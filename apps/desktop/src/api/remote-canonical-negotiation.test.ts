@@ -227,3 +227,57 @@ test('requests made at transport open wait for public protocol readiness', async
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })
+
+test.each([true, false])('a closed listener can immediately reconnect without rejecting the replacement handshake (ready=%s)', async advertised => {
+  const wsPackage = 'ws'
+  const { WebSocketServer } = await import(wsPackage)
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise<void>(resolve => server.once('listening', resolve))
+  const peers: FixtureSocket[] = []
+  server.on('connection', (socket: FixtureSocket) => {
+    peers.push(socket)
+    socket.on('message', bytes => {
+      const frame = JSON.parse(bytes.toString())
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { pong: true } }))
+    })
+
+    if (advertised || peers.length > 1) {
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: {
+        type: 'gateway.ready', payload: { session_authority: true }
+      } }))
+    }
+  })
+  const client = new HermesGateway()
+  const address = server.address() as { port: number }
+  const url = `ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`
+  let redial: Promise<void> | undefined
+
+  let stop = () => {}
+
+  try {
+    const opened = new Promise<void>(resolve => client.onState(state => { if (state === 'open') { resolve() } }))
+    stop = client.onState(state => {
+      if (state !== 'closed') { return }
+      stop()
+      redial = client.connect(url)
+      void redial.catch(() => {})
+    })
+    const initial = client.connect(url)
+    const initialOutcome = initial.then(() => 'ready', () => 'closed')
+    await opened
+
+    if (advertised) { await initial }
+    peers[0].terminate()
+    await vi.waitFor(() => expect(redial).toBeDefined())
+    await expect(redial).resolves.toBeUndefined()
+    await expect(initialOutcome).resolves.toBe(advertised ? 'ready' : 'closed')
+    await expect(client.request('ping')).resolves.toEqual({ pong: true })
+    expect(peers).toHaveLength(2)
+  } finally {
+    stop()
+    client.close()
+
+    for (const socket of server.clients) { socket.terminate() }
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})

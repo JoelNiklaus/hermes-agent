@@ -53,6 +53,7 @@ class NetworkSocket extends EventTarget {
 
       this.readyState = NetworkSocket.OPEN
       this.dispatchEvent(new Event('open'))
+      this.receive({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
     }, 1)
   }
 
@@ -65,13 +66,15 @@ class NetworkSocket extends EventTarget {
     this.requests.push(request)
 
     const result =
-      request.method === 'session.events.since'
-        ? {
-            events: history.filter(
-              event => event.session_id === request.params.session_id && event.seq! > Number(request.params.last_seen)
-            )
-          }
-        : { status: 'streaming' }
+      request.method === 'client.capabilities'
+        ? { server_requests: [] }
+        : request.method === 'session.events.since'
+          ? {
+              events: history.filter(
+                event => event.session_id === request.params.session_id && event.seq! > Number(request.params.last_seen)
+              )
+            }
+          : { status: 'streaming' }
 
     // Server ACK is asynchronous, after request() installed its pending entry.
     setTimeout(() => this.receive({ jsonrpc: '2.0', id: request.id, result }), 1)
@@ -197,6 +200,7 @@ describe('background remote turn reconnect', () => {
     const remote = sockets.filter(socket => socket.url === remoteUrl)
     expect(remote).toHaveLength(1)
     expect(remote[0].requests).toEqual([
+      expect.objectContaining({ method: 'client.capabilities', params: { server_requests: true } }),
       expect.objectContaining({ method: 'prompt.submit', params: expect.objectContaining({ session_id: sessionId }) })
     ])
     expect(liveSecondaryConnectionIds()).toEqual(new Set([owner.connectionId]))

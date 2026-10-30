@@ -1,7 +1,7 @@
 type Listener = (ev: unknown) => void
 
-// Minimal WebSocket stand-in implementing only what json-rpc-gateway.connect()
-// touches: readyState, add/removeEventListener('open'|'error'|'close'), close().
+// Minimal WebSocket stand-in for the real transport and gateway.ready handshake.
+// An open transport alone does not complete HermesGateway.connect().
 export class FakeWebSocket {
   static OPEN = 1
   static CLOSED = 3
@@ -28,6 +28,9 @@ export class FakeWebSocket {
       if (willOpen) {
         this.readyState = FakeWebSocket.OPEN
         this.emit('open', {})
+        this.emit('message', {
+          data: JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
+        })
       } else {
         this.readyState = FakeWebSocket.CLOSED
         this.emit('error', {})

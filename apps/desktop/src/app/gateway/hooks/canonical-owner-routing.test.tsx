@@ -90,6 +90,11 @@ test('keeps canonical alpha events and questions on alpha while beta is foregrou
     const questions = vi.fn((_request: unknown) => true)
     render(<Harness handleGatewayEvent={events} handleServerRequest={questions} />)
     await flushAsync()
+    expect(events).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: 'gateway.ready', profile: 'default' })
+    )
+    // The assertions below concern session events, after the boot handshake.
+    events.mockClear()
     const socket = FakeWebSocket.instances[0]
 
     const emit = (data: object) => (socket as unknown as { emit: (type: string, ev: unknown) => void })

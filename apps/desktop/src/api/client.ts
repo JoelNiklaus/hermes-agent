@@ -97,6 +97,29 @@ function remainingRequestBudget(deadline: number, signal?: AbortSignal): number 
   return remaining
 }
 
+// Waiting for the connection spends the caller's budget, but expiry must not
+// reject the shared handshake or prevent another request from using the socket.
+function waitForProtocolReady(ready: Promise<void>, deadline: number, signal?: AbortSignal): Promise<void> {
+  const timeoutMs = remainingRequestBudget(deadline, signal)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+
+  const stopped = new Promise<void>((_resolve, reject) => {
+    if (timeoutMs > 0) { timer = setTimeout(() => reject(new Error('Hermes gateway request timed out')), timeoutMs) }
+
+    if (signal) {
+      onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+  })
+
+  return Promise.race([ready, stopped]).finally(() => {
+    clearTimeout(timer)
+
+    if (onAbort) { signal?.removeEventListener('abort', onAbort) }
+  })
+}
+
 export class HermesGateway extends JsonRpcGatewayClient {
   private canonical = false
   private nativeDial = false
@@ -372,7 +395,11 @@ export class HermesGateway extends JsonRpcGatewayClient {
     try {
       const transport = super.connect(wsUrl)
       stopState = this.onState(state => {
-        if (state === 'closed') { rejectReady(new Error('Hermes gateway disconnected before protocol readiness')) }
+        // A closed observer can redial while the shared client visits its live listener set.
+        // Reject the old handshake, but do not apply that old event to the replacement.
+        if (state === 'closed' && (generation !== this.connectionGeneration || this.connectionState === 'closed')) {
+          rejectReady(new Error('Hermes gateway disconnected before protocol readiness'))
+        }
       })
       await Promise.all([transport, ready])
     } catch (error) {
@@ -431,12 +458,12 @@ export class HermesGateway extends JsonRpcGatewayClient {
   }
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+    const deadline = requestDeadline(timeoutMs)
     const generation = this.connectionGeneration
-    await this.protocolReady
+    await waitForProtocolReady(this.protocolReady, deadline, signal)
     this.requireConnectionGeneration(generation)
 
-    if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), timeoutMs, signal) }
-    const deadline = requestDeadline(timeoutMs)
+    if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), remainingRequestBudget(deadline, signal), signal) }
     // A truncating submit (edit / regenerate / restore) is the owner's rewind, then the submit.
     const rewind = method === 'prompt.submit' ? splitRewindSubmit(params) : null
 
@@ -453,7 +480,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
     if (promptOwner) {
       const answer = typeof params.answer === 'string' ? params.answer : ''
 
-      return this.request<T>('clarify.respond', { session_id: promptOwner.sessionId, profile: promptOwner.profile, request_id: params.request_id, answer }, timeoutMs, signal)
+      return this.request<T>('clarify.respond', { session_id: promptOwner.sessionId, profile: promptOwner.profile, request_id: params.request_id, answer }, remainingRequestBudget(deadline, signal), signal)
     }
 
     params = this.routeCanonicalParams(method, params)
