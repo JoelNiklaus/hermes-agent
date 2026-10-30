@@ -109,6 +109,25 @@ export function pinnedOwnerCount(): number {
 }
 
 /**
+ * Composer prong: the composer's loaded scope disagrees with the resolved
+ * submit target (#59305). Not a start/now comparison like the route and
+ * selection prongs — the composer hands over one snapshot per submit — and not
+ * navigation either: it says the text names a different chat than the one the
+ * send targets. That is why a send whose runtime is already pinned still stops
+ * on it while it rides through the user opening another chat. Compared against
+ * submitTargetComposerScope (lineage-pinned), NOT the live tip — see the field
+ * doc on SessionContextDriftArgs for why those two must not be conflated.
+ */
+export function composerScopeDrift(
+  composerScope: string | null | undefined,
+  submitTargetComposerScope: string | null | undefined
+): string | null {
+  return composerScope !== undefined && composerScope !== null && composerScope !== submitTargetComposerScope
+    ? `composer:${composerScope}->${submitTargetComposerScope}`
+    : null
+}
+
+/**
  * Decide whether the session context genuinely changed under an in-flight
  * submit — the user (or a real navigation) moved to a DIFFERENT chat — as
  * opposed to the programmatic churn a busy gateway produces constantly:
@@ -131,16 +150,10 @@ export function sessionContextDrift({
   pinOwner
 }: SessionContextDriftArgs): string | null {
   const activePins = pinOwner ? pinnedStoredSessionIdsForOwner(pinOwner) : NO_PINS
+  const composerDrift = composerScopeDrift(composerScope, submitTargetComposerScope)
 
-  // Composer prong: the composer's loaded scope disagrees with the resolved
-  // submit target. Not a start/now comparison like the two prongs below — the
-  // composer only hands us one snapshot per submit — but it belongs in the
-  // same fail-closed gate since it's exactly the same "wrong session" failure
-  // mode. Compared against submitTargetComposerScope (lineage-pinned), NOT
-  // submitTargetStoredId (live tip) — see the field doc on
-  // SessionContextDriftArgs for why those two must not be conflated.
-  if (composerScope !== undefined && composerScope !== null && composerScope !== submitTargetComposerScope) {
-    return `composer:${composerScope}->${submitTargetComposerScope}`
+  if (composerDrift) {
+    return composerDrift
   }
 
   const targetStart = routeTargetFromToken(startRouteToken)

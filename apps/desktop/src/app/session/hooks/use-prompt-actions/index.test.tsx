@@ -4428,7 +4428,7 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     )
   })
 
-  it('aborts a new-session submit when sidebar navigation changes the route before its selected ref (#62562)', async () => {
+  it('a new-session submit whose route moves to another chat during attachment sync still lands in the created chat (#62562)', async () => {
     const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
     let routeToken = '/::'
@@ -4499,23 +4499,26 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
 
     // selectSidebarItem calls navigate() first. The routed effect has not yet
     // entered resumeSession(), so the selected-session ref still points at the
-    // just-created session when attachment sync settles — the route move to a
-    // DIFFERENT chat must abort on its own.
+    // just-created session when attachment sync settles. The send's runtime is
+    // already the created chat's, so the route move must neither cancel it nor
+    // redirect it into the chat the user opened.
     routeToken = '/sidebar-target::'
     releaseAttach()
 
-    expect(await submitting).toBe(false)
+    expect(await submitting).toBe(true)
     expect(selectedStoredSessionIdRef.current).toBe(NEW_STORED_ID)
-    expect(calls.some(call => call.method === 'prompt.submit')).toBe(false)
+    expect(calls.filter(call => call.method === 'prompt.submit').map(call => call.params?.session_id)).toEqual([
+      NEW_RUNTIME_ID
+    ])
   })
 
-  it('still aborts when the user genuinely switches chats after create, during attachment sync (#62805)', async () => {
+  it('a genuine chat switch after create, during attachment sync, still delivers into the created chat only (#62805)', async () => {
     // The post-create re-baseline (adopting the created chat as the pinned
-    // target) must not mask a REAL switch later in the pipeline: the user
-    // clicks a different session after createBackendSessionForSend lands but
-    // before attachment sync settles — selection AND route both move to the
-    // other chat, and the drift check at the post-attachments boundary must
-    // abort rather than deliver the text into whichever chat won the race.
+    // target) must not let a REAL switch later in the pipeline redirect the
+    // text: the user clicks a different session after createBackendSessionForSend
+    // lands but before attachment sync settles — selection AND route both move
+    // to the other chat. The send's runtime is already the created chat's, so
+    // it finishes there and never reaches the chat the user opened.
     const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
     let routeToken = '/::'
@@ -4590,8 +4593,8 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     routeToken = '/stored-other-session::'
     releaseFileAttach()
 
-    expect(await submitting).toBe(false)
-    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+    expect(await submitting).toBe(true)
+    expect(calls.filter(c => c.method === 'prompt.submit').map(c => c.params?.session_id)).toEqual([NEW_RUNTIME_ID])
   })
 })
 
