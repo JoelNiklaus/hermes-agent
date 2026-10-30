@@ -785,7 +785,9 @@ export interface SubmitTextOptions {
   attachments?: ComposerAttachment[]
   /** The composer scope key that was actually loaded when this text was
    *  submitted (see use-composer-draft's activeQueueSessionKeyRef). Compared
-   *  against the resolved submit target in sessionContextDrift — a mismatch
+   *  against the resolved submit target in composerScopeDrift (a prong of
+   *  sessionContextDrift, and the one check a send with a pinned runtime
+   *  still stops on) — a mismatch
    *  means the composer and the session-side refs disagreed about which
    *  session this send belongs to (#59305). Omit for non-composer submits
    *  (queue drain, steer, external submit requests): the check is a no-op

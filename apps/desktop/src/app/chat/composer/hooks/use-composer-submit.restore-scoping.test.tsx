@@ -30,7 +30,7 @@ import {
   setSessions,
   setYoloActive
 } from '@/store/session'
-import { _resetSessionOwnerHoldsForTests } from '@/store/session-states'
+import { _resetSessionOwnerHoldsForTests, dropSessionState } from '@/store/session-states'
 
 import { composerPlainText } from '../rich-editor'
 import type { ChatBarProps } from '../types'
@@ -269,6 +269,10 @@ afterEach(() => {
   clearSessionDraft(null)
   _resetSessionOwnerHintsForTests({ storage: true })
   _resetSessionOwnerHoldsForTests()
+  // A turn a test left running (the identical-message test leaves rt-B
+  // started) must not make the next test's send to that runtime look busy.
+  dropSessionState('rt-A')
+  dropSessionState('rt-B')
   setYoloActive(false)
   announceNewSessionDraftKey(null)
   $newChatRoute.set(null)
@@ -593,4 +597,72 @@ it('a new identical message never adopts an unconfirmed send; the restored draft
   await act(async () => handles.submit.submitDraft())
   await waitFor(() => expect(ids()).toHaveLength(4))
   expect(ids()[3]).toBe(ids()[2])
+})
+
+// Joel's report: "I submit a message, come back to that chat later, and it is not submitted."
+// Enter clears the composer and starts the send; the journal write before prompt.submit is an
+// IPC round trip to the main process. Opening another chat inside that window used to abort the
+// send and hand the words back to the old chat's draft, where they waited, unsent.
+it('a send still in its journal write when the user opens another chat reaches its chat and is not handed back as a draft', async () => {
+  let releaseJournal: () => void = () => {}
+  let journalWrites = 0
+  const previousDesktop = window.hermesDesktop
+  window.hermesDesktop = {
+    ...previousDesktop,
+    preparedSubmissions: {
+      read: async () => '{}',
+      update: async (_key: string, entry: null | string) => {
+        if (entry === null) {
+          return
+        }
+
+        journalWrites += 1
+        await new Promise<void>(resolve => {
+          releaseJournal = resolve
+        })
+      }
+    }
+  } as never
+
+  vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method, params) => {
+    if (method !== 'prompt.submit') {
+      throw new Error(`unexpected ${method}`)
+    }
+
+    const { session_id, submission_id } = params as Record<string, unknown>
+
+    return { admission_id: submission_id, session_id, status: 'started' }
+  })
+
+  try {
+    stashSessionDraft('stored-B', 'B’s question, sent before leaving', [])
+    stashSessionDraft('stored-A', 'A’s own draft', [])
+    seed()
+    act(() => handles.submit.submitDraft())
+    await waitFor(() => expect(journalWrites).toBe(1))
+
+    act(() => navigate('A'))
+    expect(editorText()).toBe('A’s own draft')
+    await act(async () => releaseJournal())
+
+    await waitFor(() =>
+      expect(requestGatewayForProfile).toHaveBeenCalledWith(
+        'default',
+        'prompt.submit',
+        expect.objectContaining({ session_id: 'rt-B', text: 'B’s question, sent before leaving' }),
+        expect.anything(),
+        undefined
+      )
+    )
+    expect(vi.mocked(requestGatewayForProfile)).toHaveBeenCalledTimes(1)
+    expect(editorText()).toBe('A’s own draft')
+
+    flushDraft()
+    expect(takeSessionDraft('stored-B').text.trim()).toBe('')
+    expect(takeSessionDraft('stored-A').text.trim()).toBe('A’s own draft')
+    act(() => navigate('B'))
+    expect(editorText()).toBe('')
+  } finally {
+    window.hermesDesktop = previousDesktop
+  }
 })

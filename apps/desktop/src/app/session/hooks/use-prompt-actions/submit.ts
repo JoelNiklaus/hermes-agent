@@ -45,7 +45,7 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { cronRunWriteGateApplies, refreshCronRunWriteGate } from '../../../cron/open-cron-run'
 import type { ClientSessionState } from '../../../types'
-import { routeTargetFromToken, sessionContextDrift } from '../session-context-drift'
+import { composerScopeDrift, routeTargetFromToken, sessionContextDrift } from '../session-context-drift'
 import type { CreateBackendSessionForSend } from '../use-session-actions/create-overrides'
 import { resolveSessionOwner, resolveSessionProfile } from '../use-session-actions/utils'
 
@@ -525,6 +525,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // switched chats while this submit was in flight.
       let startingSelectedStoredSessionId = selectedStoredSessionId
 
+      // The composer keys drafts/attachments on the durable lineage root
+      // (survives auto-compression tip rotation), while startingStoredSessionId
+      // is the live tip — resolve the target into the same lineage-root domain
+      // before comparing, or every submit into a session that has ever
+      // compressed would false-positive-abort.
+      const submitTargetComposerScope = () => resolveComposerSessionKey(startingStoredSessionId, $sessions.get())
+
       // Reason string (or null) for why the session context genuinely drifted
       // under this in-flight submit. sessionContextDrift ignores the churn a
       // busy gateway produces (selection null-resets on a gateway/profile
@@ -544,15 +551,20 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               nowSelectedStoredId: selectedStoredSessionIdRef.current,
               submitTargetStoredId: startingStoredSessionId,
               composerScope: options?.composerScope,
-              // The composer keys drafts/attachments on the durable lineage
-              // root (survives auto-compression tip rotation), while
-              // startingStoredSessionId is the live tip — resolve the target
-              // into the same lineage-root domain before comparing, or every
-              // submit into a session that has ever compressed would
-              // false-positive-abort.
-              submitTargetComposerScope: resolveComposerSessionKey(startingStoredSessionId, $sessions.get())
+              submitTargetComposerScope: submitTargetComposerScope()
             })
           : null
+
+      // Once the send's runtime is resolved (proven at entry, resumed for its
+      // stored id, or just created), every later step addresses that pinned
+      // runtime, not the view. Opening another chat then no longer changes
+      // where the words go, so it must not cancel the send: the abort only
+      // handed them back to the old chat's draft, and the user found the
+      // message unsent when they returned. From that point the send finishes in
+      // the background like any other chat's turn; only a composer scope that
+      // names another chat (#59305) still stops it.
+      const pinnedSendDrift = (): string | null =>
+        targetStartedInCurrentView ? composerScopeDrift(options?.composerScope, submitTargetComposerScope()) : null
 
       const targetIsCurrentView = (): boolean => targetStartedInCurrentView && !sessionDriftReason()
 
@@ -1052,10 +1064,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         sessionId = liveSessionId
 
-        const attachmentsDrift = sessionDriftReason()
+        // The runtime is pinned from here on (see pinnedSendDrift): a chat
+        // switch during attachment sync or the journal write below no longer
+        // cancels the send. The composer-scope check has the same inputs at
+        // both points, so this one gate covers the journal write as well.
+        const pinnedDrift = pinnedSendDrift()
 
-        if (attachmentsDrift) {
-          console.warn('[submit-drift-abort]', attachmentsDrift, { phase: 'post-attachments' })
+        if (pinnedDrift) {
+          console.warn('[submit-drift-abort]', pinnedDrift, { phase: 'post-attachments' })
 
           return abortForSessionSwitch(liveSessionId)
         }
@@ -1118,10 +1134,6 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         const retryKey = retainedKey ?? (await preparedSubmissionSlot(retryKeyForTarget()))
         await writePreparedSubmission(retryKey, prepared)
-
-        if (sessionDriftReason()) {
-          return abortForSessionSwitch(liveSessionId)
-        }
 
         // On sleep/wake the gateway's in-memory session may have been cleared
         // while the desktop app still holds the old session ID. The shared
