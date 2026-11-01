@@ -1579,6 +1579,9 @@ describe('createBackendSessionForSend profile routing', () => {
   it('passes the current workspace cwd into session.create', async () => {
     const params = await createWith(() => {
       $currentCwd.set('/remote/worktree')
+      // Match the workspace picker's explicit draft target, not just its
+      // readout (which can also contain an inherited host-local default).
+      setNewChatWorkspaceTarget('/remote/worktree')
     })
 
     expect(params).toMatchObject({ cwd: '/remote/worktree' })

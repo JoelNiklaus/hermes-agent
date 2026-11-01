@@ -1890,7 +1890,8 @@ export const zhOverrides = {
       autoArchiveDaysUnit: '天无活动',
       autoArchiveFailed: '无法更新自动归档设置',
       defaultDirTitle: '默认项目目录',
-      defaultDirDesc: '新会话默认从此文件夹开始，除非你选择其他目录。留空则使用你的 home 目录。',
+      defaultDirDesc:
+        '在桌面应用中，此默认文件夹仅适用于新建的本地聊天。在浏览器中，它适用于所连接的服务器。为聊天单独选择的文件夹优先。',
       defaultDirUpdated: () => '默认项目目录已更新',
       defaultsTo: label => `默认使用 ${label}。`,
       change: '更改',

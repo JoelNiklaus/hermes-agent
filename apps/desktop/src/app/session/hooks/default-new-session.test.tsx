@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DesktopProfileRoute } from '@/global'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $defaultProfileRoute, setDefaultProfile } from '@/store/default-profile'
-import { requestGatewayForAgent } from '@/store/gateway'
+import { dialedGatewayModeFor, requestGatewayForAgent } from '@/store/gateway'
 import {
   $activeGatewayProfile,
   $newChatConnectionId,
@@ -24,11 +24,14 @@ import {
   getSessionOwnerHint,
   setActiveSessionId,
   setConnection,
+  setCurrentCwdExplicit,
   setSessions
 } from '@/store/session'
+import { deferred } from '@/test/deferred'
 
 import { useSlashCommand } from './use-prompt-actions/slash'
 import { useSessionActions } from './use-session-actions'
+import { desktopSessionCreateParams } from './use-session-actions/session-create-request'
 
 vi.mock('@/store/profile', async original => ({
   ...(await original<Record<string, unknown>>()),
@@ -38,6 +41,7 @@ vi.mock('@/store/profile', async original => ({
 vi.mock('@/store/gateway', async original => ({
   ...(await original<Record<string, unknown>>()),
   activeGatewayConnectionId: vi.fn(() => 'previous'),
+  dialedGatewayModeFor: vi.fn(() => 'remote'),
   requestGatewayForAgent: vi.fn(),
   retainGatewayForAgent: vi.fn(async () => () => undefined)
 }))
@@ -48,7 +52,12 @@ const FOREGROUND_CREATE_DIAL = [undefined, undefined, { spawnPriority: 'foregrou
 
 function mountActions() {
   const ref = <T,>(current: T) => ({ current })
-  const requestGateway = vi.fn(async () => ({ session_id: 'ambient', stored_session_id: 'ambient-stored' }) as never)
+
+  const requestGateway = vi.fn(
+    async (_method: string, _params?: Record<string, unknown>) =>
+      ({ session_id: 'ambient', stored_session_id: 'ambient-stored' }) as never
+  )
+
   const navigate = vi.fn()
   const state = createClientSessionState()
 
@@ -214,6 +223,148 @@ describe('generic new session default routing', () => {
     await act(() => result.current.openNewSessionTile('right', { profile: 'chosen', route: null }))
     expect(requestGateway).toHaveBeenCalledWith('session.create', expect.objectContaining({ profile: 'chosen' }))
     expect(requestGatewayForAgent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { initial: 'local', target: 'remote', expected: undefined },
+    { initial: 'remote', target: 'local', expected: '/Users/example/Projects' }
+  ])('resolves a profile-only $target default after activation', async ({ initial, target, expected }) => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    setConnection({ mode: initial, profile: 'other' } as never)
+    vi.mocked(dialedGatewayModeFor).mockReturnValue(null)
+    vi.mocked(ensureGatewayProfile).mockImplementation(async () => {
+      setConnection({ mode: target, profile: 'chosen' } as never)
+      vi.mocked(dialedGatewayModeFor).mockReturnValue(target as 'local' | 'remote')
+    })
+    const { result, requestGateway } = mountActions()
+
+    try {
+      await act(() => result.current.openNewSessionTile('right', { profile: 'chosen', route: null }))
+      const params = requestGateway.mock.calls.find(call => call[0] === 'session.create')?.[1]
+      expect(params).toMatchObject({ profile: 'chosen' })
+      expect(params?.cwd).toBe(expected)
+    } finally {
+      vi.mocked(ensureGatewayProfile).mockReset().mockResolvedValue(undefined)
+      vi.mocked(dialedGatewayModeFor).mockReturnValue('remote')
+    }
+  })
+
+  it('does not carry the Mac default through a delayed remote activation', async () => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    setConnection({ mode: 'local', connectionId: 'local', profile: 'default' } as never)
+    const activation = deferred()
+    vi.mocked(ensureGatewayAgent).mockImplementation(async () => {
+      await activation.promise
+      setConnection({ mode: 'remote', connectionId: 'lab', profile: 'research' } as never)
+    })
+    const { result } = mountActions()
+
+    try {
+      await act(() => setDefaultProfile({ connectionId: 'lab', profile: 'research' }))
+      act(() => result.current.selectSidebarItem({ action: 'new-session' } as never))
+      await act(async () => {
+        const created = result.current.createBackendSessionForSend()
+        activation.resolve()
+        await created
+      })
+
+      const create = vi.mocked(requestGatewayForAgent).mock.calls.find(call => call[2] === 'session.create')
+      expect(create?.slice(0, 3)).toEqual(['lab', 'research', 'session.create'])
+      expect(create?.[3]).not.toHaveProperty('cwd')
+    } finally {
+      activation.resolve()
+      vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined)
+    }
+  })
+
+  it.each(['local', 'lab'])('uses the remote socket for a %s tile before foreground activation', async connectionId => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    setConnection({ mode: 'local', connectionId: 'local', profile: 'default' } as never)
+    const activation = deferred()
+    vi.mocked(dialedGatewayModeFor).mockReturnValue(null)
+    vi.mocked(ensureGatewayAgent).mockImplementation(async () => {
+      await activation.promise
+      vi.mocked(dialedGatewayModeFor).mockReturnValue('remote')
+    })
+    const { result } = mountActions()
+
+    try {
+      await act(async () => {
+        const created = result.current.openNewSessionTile('right', { route: { connectionId, profile: 'research' } })
+        activation.resolve()
+        await created
+      })
+
+      const create = vi.mocked(requestGatewayForAgent).mock.calls.find(call => call[2] === 'session.create')
+      expect(create?.slice(0, 3)).toEqual([connectionId, 'research', 'session.create'])
+      expect(create?.[3]).not.toHaveProperty('cwd')
+    } finally {
+      activation.resolve()
+      vi.mocked(dialedGatewayModeFor).mockReturnValue('remote')
+      vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined)
+    }
+  })
+
+  it('does not label an inherited local default as an explicit workspace', async () => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    vi.mocked(dialedGatewayModeFor).mockReturnValue('local')
+    setCurrentCwdExplicit(true)
+
+    try {
+      const params = await desktopSessionCreateParams(undefined, { connectionId: 'local', profile: 'default' })
+      expect(params).toMatchObject({ cwd: '/Users/example/Projects', cwd_explicit: false })
+    } finally {
+      setCurrentCwdExplicit(false)
+      vi.mocked(dialedGatewayModeFor).mockReturnValue('remote')
+    }
+  })
+
+  it('captures explicit workspace provenance before the gateway activation yields', async () => {
+    const activation = deferred()
+    vi.mocked(ensureGatewayAgent).mockImplementation(() => activation.promise)
+    const { result } = mountActions()
+
+    try {
+      act(() => result.current.startFreshSessionDraft({ workspaceTarget: '/srv/work/project' }))
+      await act(async () => {
+        const created = result.current.createBackendSessionForSend()
+        setCurrentCwdExplicit(false)
+        activation.resolve()
+        await created
+      })
+
+      expect(requestGatewayForAgent).toHaveBeenCalledWith(
+        'previous',
+        'other',
+        'session.create',
+        expect.objectContaining({ cwd: '/srv/work/project', cwd_explicit: true }),
+        ...FOREGROUND_CREATE_DIAL
+      )
+    } finally {
+      activation.resolve()
+      setCurrentCwdExplicit(false)
+      vi.mocked(ensureGatewayAgent).mockReset().mockResolvedValue(undefined)
+    }
+  })
+
+  it.each(['draft', 'tile'])('preserves an explicit remote workspace for a %s', async action => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    const { result } = mountActions()
+
+    if (action === 'draft') {
+      act(() => result.current.startFreshSessionDraft({ workspaceTarget: '/srv/work/project' }))
+      await act(() => result.current.createBackendSessionForSend())
+    } else {
+      await act(() => result.current.openNewSessionTile('right', { cwd: '/srv/work/project' }))
+    }
+
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(
+      'previous',
+      'other',
+      'session.create',
+      expect.objectContaining({ cwd: '/srv/work/project', cwd_explicit: true, profile: 'other' }),
+      ...FOREGROUND_CREATE_DIAL
+    )
   })
 
   it('does not mistake the configured default folder for explicit project routing', async () => {

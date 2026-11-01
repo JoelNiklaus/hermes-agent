@@ -1,4 +1,4 @@
-import { requestGatewayForAgent } from '@/store/gateway'
+import { dialedGatewayModeFor, requestGatewayForAgent } from '@/store/gateway'
 import {
   $activeGatewayProfile,
   $newChatProfile,
@@ -9,13 +9,15 @@ import {
   resolveNewChatOwnerRoute
 } from '@/store/profile'
 import {
+  $connection,
   $currentCwdExplicit,
   $currentFastMode,
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
   $currentServiceTier,
-  getCurrentModelSource
+  getCurrentModelSource,
+  workspaceCwdForNewSession
 } from '@/store/session'
 import type { SessionCreateResponse } from '@/types/hermes'
 
@@ -92,7 +94,7 @@ export async function createGatewaySession(
 // provider only ride when the composer source is 'manual' — a default-sourced
 // value is a mirror of Settings → Model and must not pin the new chat.
 export async function desktopSessionCreateParams(
-  cwd: string,
+  requestedCwd: string | undefined,
   capturedRoute = resolveNewChatOwnerRoute(),
   requestedProfile?: string,
   legacyProfileIntent = false,
@@ -107,6 +109,7 @@ export async function desktopSessionCreateParams(
   // Shipping that stale value as an override pins every new chat to the old
   // model. Omit model/provider unless the source is 'manual'.
   const isManualSelection = getCurrentModelSource() === 'manual'
+  const cwdExplicit = requestedCwd !== undefined && $currentCwdExplicit.get()
 
   const selection = {
     effort: $currentReasoningEffort.get().trim(),
@@ -130,13 +133,34 @@ export async function desktopSessionCreateParams(
     await ensureGatewayProfile(profile)
   }
 
+  // An absent default resolves only after the captured owner is ready. The
+  // foreground descriptor and a registry kind can both name another machine.
+  // Shared-primary profiles have no secondary socket. Their published
+  // descriptor is usable only when it names this exact requested owner.
+  const ownerProfile = capturedRoute?.targetProfile || profile
+  const connection = $connection.get()
+
+  const sharedMode =
+    connection?.sharedPrimary === true &&
+    normalizeProfileKey(connection.profile) === normalizeProfileKey(ownerProfile) &&
+    (!capturedRoute || connection.connectionId === capturedRoute.connectionId)
+      ? (connection.mode ?? null)
+      : null
+
+  const cwd =
+    requestedCwd ??
+    workspaceCwdForNewSession(
+      ownerProfile,
+      dialedGatewayModeFor(capturedRoute?.connectionId ?? null, profile) ?? sharedMode
+    )
+
   return {
     cols: 96,
     source: 'desktop',
     ...(cwd && { cwd }),
     // #52589: explicit provenance for the shipped cwd — an inherited app-global
     // workspace must not override the target profile's configured terminal.cwd.
-    ...(cwd && { cwd_explicit: $currentCwdExplicit.get() }),
+    ...(cwd && { cwd_explicit: cwdExplicit }),
     ...(profile ? { profile: capturedRoute?.targetProfile || profile } : {}),
     ...(includeComposerSelection
       ? {

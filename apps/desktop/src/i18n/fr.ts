@@ -2276,9 +2276,9 @@ export const frOverrides = {
       autoArchiveFailed: "Impossible de mettre à jour l'auto-archivage",
       defaultDirTitle: 'Répertoire de projet par défaut',
       defaultDirDesc:
-        'Les nouvelles sessions commencent dans ce dossier sauf si vous en choisissez un autre. Laissez-le non défini pour utiliser votre répertoire personnel.',
+        "Dans l'application de bureau, ce dossier par défaut ne s'applique qu'aux nouvelles conversations locales. Dans un navigateur, il s'applique au serveur connecté. Un dossier choisi pour une conversation est prioritaire.",
       defaultDirUpdated: shortcut =>
-        `Répertoire de projet par défaut mis à jour — commencez une nouvelle conversation${shortcut ? ` (${shortcut})` : ''} pour qu'il prenne effet`,
+        `Répertoire de projet par défaut mis à jour${shortcut ? ` (nouvelle conversation : ${shortcut})` : ''}`,
       defaultsTo: label => `Par défaut : ${label}.`,
       change: 'Modifier',
       choose: 'Choisir',

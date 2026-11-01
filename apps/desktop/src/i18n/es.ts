@@ -2259,9 +2259,9 @@ export const esOverrides = {
       autoArchiveFailed: 'No se pudo actualizar el archivado automático',
       defaultDirTitle: 'Directorio de proyecto predeterminado',
       defaultDirDesc:
-        'Las sesiones nuevas empiezan en esta carpeta salvo que elijas otra. Déjala sin definir para usar tu directorio de inicio.',
+        'En la aplicación de escritorio, esta carpeta predeterminada solo se aplica a los chats locales nuevos. En un navegador, se aplica al servidor conectado. La carpeta elegida para un chat tiene prioridad.',
       defaultDirUpdated: shortcut =>
-        `Directorio de proyecto predeterminado actualizado; inicia un chat nuevo${shortcut ? ` (${shortcut})` : ''} para que el cambio surta efecto.`,
+        `Directorio de proyecto predeterminado actualizado${shortcut ? ` (chat nuevo: ${shortcut})` : ''}`,
       defaultsTo: label => `Predeterminado: ${label}.`,
       change: 'Cambiar',
       choose: 'Elegir',

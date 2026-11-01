@@ -59,13 +59,14 @@ import {
   resolveNewChatOwnerRoute
 } from '@/store/profile'
 import { $projectScope } from '@/store/project-scope'
-import { projectProfile, resolveNewSessionCwd } from '@/store/projects'
+import { projectProfile, resolveNewSessionCwd, resolveNewSessionProjectCwd } from '@/store/projects'
 import { clearAllPrompts } from '@/store/prompts'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
 import {
   $activeSessionStoredIdRotation,
   $connection,
   $currentCwd,
+  $currentCwdExplicit,
   $messages,
   $newChatWorkspaceTarget,
   $sessions,
@@ -188,7 +189,7 @@ import {
   reconcileAuthoritativeMessages,
   resumedStreamTarget
 } from './resume-reconcile'
-import { backgroundRuntimeOptions, runtimeOwner, runtimeOwnerProfile } from './runtime-owner'
+import { backgroundRuntimeOptions, runtimeOwner } from './runtime-owner'
 import { createGatewaySession, desktopSessionCreateParams } from './session-create-request'
 import {
   createPersistedDisplayTranscriptProvenance,
@@ -595,9 +596,8 @@ export function useSessionActions({
       creatingSessionRef.current = true
 
       try {
-        // An explicit one-shot workspace target (null → detached, string → that
-        // folder) wins; otherwise the live cwd, then the project-aware default
-        // (resolveNewSessionCwd — a project's new session keeps its repo cwd).
+        // An explicit workspace target wins. Capture project/Home choices now,
+        // but defer a bare default until the destination gateway is ready.
         // Home is an explicit detached scope: do not let a stale live cwd from
         // the previously selected project leak into this new session (#84220).
         const workspaceTarget = $newChatWorkspaceTarget.get()
@@ -608,7 +608,9 @@ export function useSessionActions({
             ? ''
             : typeof workspaceTarget === 'string'
               ? workspaceTarget.trim()
-              : $currentCwd.get().trim() || resolveNewSessionCwd()
+              : $currentCwdExplicit.get()
+                ? $currentCwd.get().trim()
+                : resolveNewSessionProjectCwd()
 
         // The EXACT owner for this create: an explicit agent route, else the
         // (registry source, profile) pair the draft was made on. Read ONCE at
@@ -803,7 +805,7 @@ export function useSessionActions({
       // (same contract as createBackendSessionForSend's starting tokens).
       const startingRouteToken = getRouteToken()
       const startingSelectedStoredId = selectedStoredSessionIdRef.current
-      const params = await desktopSessionCreateParams(resolveNewSessionCwd())
+      const params = await desktopSessionCreateParams(resolveNewSessionProjectCwd())
       const created = await requestGateway<SessionCreateResponse>('session.create', params)
       const stored = created.stored_session_id
 
@@ -1012,7 +1014,7 @@ export function useSessionActions({
             ? ''
             : typeof options?.cwd === 'string'
               ? options.cwd.trim()
-              : resolveNewSessionCwd(runtimeOwnerProfile(capturedRoute, requestedProfile))
+              : resolveNewSessionProjectCwd()
 
         // #52589 provenance for the tile path: an explicitly-passed cwd is a
         // deliberate workspace pick; a resolved default is inherited.
@@ -2831,6 +2833,7 @@ export function useSessionActions({
       creatingSessionRef,
       ensureSessionState,
       navigate,
+      releaseCreatingSessionGuard,
       requestGateway,
       resumeSession,
       selectedStoredSessionIdRef,

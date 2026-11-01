@@ -1860,15 +1860,18 @@ export const $currentCwdExplicit = atom(false)
 
 export const setCurrentCwdExplicit = (next: Updater<boolean>) => updateAtom($currentCwdExplicit, next)
 
-export const workspaceCwdForNewSession = (profile?: string): string => {
+export const workspaceCwdForNewSession = (
+  profile?: string,
+  mode: 'local' | 'remote' | null | undefined = $connection.get()?.mode
+): string => {
   // A bare new chat starts DETACHED — no inherited cwd, so the composer's coding
   // rail (which keys off $currentCwd) shows no branch and the first message runs
   // in the gateway's default rather than silently in the last repo you touched.
-  // Only an explicit default-project-dir setting pre-attaches. Entering a
+  // Only a default-project-dir setting owned by the target pre-attaches. Entering a
   // project/worktree attaches its cwd directly (startSessionInWorkspace), so the
   // "remember where I was when I'm in a project" case is unaffected.
   //
-  // This must behave identically in local and remote mode: the remembered CWD
+  // Neither local nor remote mode inherits the remembered CWD: the path
   // under the remote-keyed workspaceCwdKey() can be from a *different* project
   // than the one the user is currently scoped into, and bare-new-session in
   // the wrong workspace was the #57911 symptom. Resume/restore still reads
@@ -1883,6 +1886,14 @@ export const workspaceCwdForNewSession = (profile?: string): string => {
 
   if (owner && hostHas('originScopedPrefs')) {
     return readBrowserDefaultProjectDir(browserPageBasePath(), owner)
+  }
+
+  // Electron's default folder is picked and validated on this machine. It is
+  // not a default for a remote owner, which resolves its own detached cwd.
+  // Creation supplies the dialed owner's mode. A registry `local` entry can
+  // have a remote profile override, so its kind is not a locality guarantee.
+  if (!hostHas('originScopedPrefs') && (mode === 'remote' || mode === null)) {
+    return ''
   }
 
   return getConfiguredDefaultProjectDir()

@@ -2273,9 +2273,9 @@ export const deOverrides = {
       autoArchiveFailed: 'Auto-Archivierung konnte nicht aktualisiert werden',
       defaultDirTitle: 'Standard-Projektordner',
       defaultDirDesc:
-        'Neue Sessions starten in diesem Ordner, sofern Sie keinen anderen wählen. Nicht festlegen, um Ihr Home-Verzeichnis zu verwenden.',
+        'In der Desktop-App gilt dieser Standardordner nur für neue lokale Chats. Im Browser gilt er für den verbundenen Server. Ein für einen Chat gewählter Ordner hat Vorrang.',
       defaultDirUpdated: shortcut =>
-        `Standard-Projektordner aktualisiert – starten Sie einen neuen Chat${shortcut ? ` (${shortcut})` : ''}, damit er wirksam wird`,
+        `Standard-Projektordner aktualisiert${shortcut ? ` (neuer Chat: ${shortcut})` : ''}`,
       defaultsTo: label => `Standardmäßig ${label}.`,
       change: 'Ändern',
       choose: 'Auswählen',

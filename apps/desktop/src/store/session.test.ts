@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import type { SessionInfo } from '@/types/hermes'
 
 const setUnreadRemote = vi.fn<(id: string, unread: boolean, profile?: null | string) => Promise<{ ok: boolean }>>(() =>
@@ -1125,6 +1126,37 @@ describe('workspaceCwdForNewSession', () => {
     expect($currentCwd.get()).toBe('')
   })
 
+  it('keeps the native default project folder off a remote new chat without erasing the local preference', () => {
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+    $connection.set({ baseUrl: 'http://backend-a', mode: 'remote', profile: 'default' } as never)
+
+    expect(workspaceCwdForNewSession('default')).toBe('')
+    expect(getConfiguredDefaultProjectDir()).toBe('/Users/example/Projects')
+
+    $connection.set({ baseUrl: '', mode: 'local', profile: 'default' } as never)
+    expect(workspaceCwdForNewSession('default')).toBe('/Users/example/Projects')
+  })
+
+  it.each([
+    { kind: 'local', mode: 'local' as const, expected: '/Users/example/Projects' },
+    { kind: 'local', mode: 'remote' as const, expected: '' },
+    { kind: 'local', mode: null, expected: '' },
+    { kind: 'remote', mode: 'remote' as const, expected: '' },
+    { kind: 'ssh', mode: 'remote' as const, expected: '' },
+    { kind: 'cloud', mode: 'remote' as const, expected: '' }
+  ])('uses the dialed $mode backend rather than the $kind registry kind', ({ kind, mode, expected }) => {
+    const previousRegistry = $connectionsRegistry.get()
+    $connectionsRegistry.set({ connections: [{ id: 'target', kind }] } as never)
+    $connection.set({ mode: 'local', connectionId: 'local', profile: 'default' } as never)
+    applyConfiguredDefaultProjectDir('/Users/example/Projects')
+
+    try {
+      expect(workspaceCwdForNewSession('default', mode)).toBe(expected)
+    } finally {
+      $connectionsRegistry.set(previousRegistry)
+    }
+  })
+
   it('prefers the configured default over the sticky remembered workspace', () => {
     window.localStorage.setItem('hermes.desktop.workspace-cwd', '/home/user/sticky')
     applyConfiguredDefaultProjectDir('/home/user/configured')
@@ -1298,15 +1330,19 @@ describe('workspaceCwdForNewSession', () => {
     expect(workspaceCwdForNewSession()).toBe('')
   })
 
-  it('respects an explicit configured default in remote mode (#57911)', () => {
-    // Symmetric guard: removing the remote branch must NOT regress users who
-    // *did* set a configured default — the explicit default pre-attaches
-    // identically across local and remote mode.
+  it('respects a configured default on a browser remote connection (#57911)', () => {
+    // Browser defaults belong to the serving gateway. Electron's OS-picked
+    // preference belongs only to the local machine, even on a remote chat.
+    document.documentElement.dataset.hermesDesktopHost = 'browser'
     $connection.set({ baseUrl: 'http://backend-a', mode: 'remote' } as never)
     setCurrentCwd('/tradingview')
     applyConfiguredDefaultProjectDir('/home/user/configured')
 
-    expect(workspaceCwdForNewSession()).toBe('/home/user/configured')
+    try {
+      expect(workspaceCwdForNewSession()).toBe('/home/user/configured')
+    } finally {
+      delete document.documentElement.dataset.hermesDesktopHost
+    }
   })
 })
 

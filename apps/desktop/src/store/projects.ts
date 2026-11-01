@@ -152,9 +152,8 @@ export function goToProject(id: string, options?: { newSession?: boolean }): voi
 //
 // Priority (first hit wins):
 //   1. Explicit sidebar project scope (drilled into a project / Home bucket)
-//   2. Configured default project dir (detached otherwise — in BOTH local and
-//      remote mode; a bare new chat never inherits the sticky remembered cwd,
-//      #57911 / #84220)
+//   2. Owner-scoped default project dir (native preferences are local-only).
+//      A bare new chat never inherits the sticky remembered cwd (#57911 / #84220).
 //
 // The "active project" is just an atom ($projectScope) — so inside a project a
 // new session (cmd-n, the trunk "+") starts at that project's root (its primary
@@ -163,6 +162,14 @@ export function goToProject(id: string, options?: { newSession?: boolean }): voi
 // stored cwd is often a home-dir fallback, so every new chat landed there
 // instead of the configured default (#71873, #80213, #77496).
 export function resolveNewSessionCwd(profile?: string): string {
+  const owner = (profile?.trim() || $newChatProfile.get() || $activeGatewayProfile.get()).trim()
+
+  return resolveNewSessionProjectCwd() ?? workspaceCwdForNewSession(owner)
+}
+
+// Capture the project choice before an asynchronous owner activation: empty
+// means Home/detached; undefined defers the default to the destination backend.
+export function resolveNewSessionProjectCwd(): string | undefined {
   const scope = $projectScope.get()
 
   // Inside Home, "no folder" is the point: a new chat must stay detached rather
@@ -179,11 +186,7 @@ export function resolveNewSessionCwd(profile?: string): string {
     }
   }
 
-  // A tile names its profile before $newChatProfile catches up. The folder
-  // belongs to that profile, which on a browser host is its own stored default.
-  const owner = (profile?.trim() || $newChatProfile.get() || $activeGatewayProfile.get()).trim()
-
-  return workspaceCwdForNewSession(owner)
+  return undefined
 }
 
 // Entering a project moves the live workspace only when main holds a fresh

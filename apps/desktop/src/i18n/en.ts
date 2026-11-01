@@ -1911,9 +1911,8 @@ export const en: Translations = {
       autoArchiveFailed: 'Could not update auto-archive',
       defaultDirTitle: 'Default project directory',
       defaultDirDesc:
-        'New sessions start in this folder unless you pick another. Leave it unset to use your home directory.',
-      defaultDirUpdated: shortcut =>
-        `Default project directory updated — start a new chat${shortcut ? ` (${shortcut})` : ''} for it to take effect`,
+        'In the desktop app, this is the default folder for new local chats only. In a browser, it applies to the connected server. A folder chosen for a chat takes priority.',
+      defaultDirUpdated: shortcut => `Default project directory updated${shortcut ? ` (new chat: ${shortcut})` : ''}`,
       defaultsTo: label => `Defaults to ${label}.`,
       change: 'Change',
       choose: 'Choose',
