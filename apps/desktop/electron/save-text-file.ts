@@ -117,9 +117,8 @@ export async function selectSavePath(options: any, deps: SaveTextFileDeps): Prom
 /** `hermes:selectSavePath` (path only) and `hermes:saveTextFileAs` (dialog + main-process write). */
 export function registerSaveDialogIpc<Event>(
   ipcMain: IpcMainLike<Event>,
-  deps: SaveTextFileDeps | ((event: Event) => SaveTextFileDeps)
+  depsForEvent: (event: Event) => SaveTextFileDeps
 ): void {
-  const forEvent = (event: Event): SaveTextFileDeps => (typeof deps === 'function' ? deps(event) : deps)
-  ipcMain.handle('hermes:selectSavePath', (event, options = {}) => selectSavePath(options, forEvent(event)))
-  ipcMain.handle('hermes:saveTextFileAs', (event, request) => saveTextFileAs(request || {}, forEvent(event)))
+  ipcMain.handle('hermes:selectSavePath', (event, options = {}) => selectSavePath(options, depsForEvent(event)))
+  ipcMain.handle('hermes:saveTextFileAs', (event, request) => saveTextFileAs(request || {}, depsForEvent(event)))
 }

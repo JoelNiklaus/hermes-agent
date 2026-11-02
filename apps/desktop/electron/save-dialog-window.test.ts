@@ -1,8 +1,10 @@
-import { expect, it } from 'vitest'
+import { expect, expectTypeOf, it } from 'vitest'
 
 import { registerSaveDialogIpc } from './save-text-file'
 
 it('scopes save-dialog dependencies to the requesting IPC event', async () => {
+  expectTypeOf<Parameters<typeof registerSaveDialogIpc>[1]>().toBeFunction()
+
   const handlers = new Map<string, (event: { sender: string }, ...args: any[]) => unknown>()
   const parents: string[] = []
   registerSaveDialogIpc(

@@ -111,7 +111,7 @@ describe('registerSaveDialogIpc', () => {
     const target = path.join(dir, 'out.json')
     registerSaveDialogIpc(
       { handle: (channel, listener) => void handlers.set(channel, listener) },
-      { defaultDir: () => dir, showSaveDialog: async () => ({ canceled: false, filePath: target }) }
+      () => ({ defaultDir: () => dir, showSaveDialog: async () => ({ canceled: false, filePath: target }) })
     )
 
     expect([...handlers.keys()].sort()).toEqual(['hermes:saveTextFileAs', 'hermes:selectSavePath'])
