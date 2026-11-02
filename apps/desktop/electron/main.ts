@@ -255,6 +255,7 @@ import {
 } from './external-terminal'
 import { f12ShortcutDecision, toF12KeyboardEventPayload } from './f12-shortcut'
 import { resolveFeatureFlags } from './feature-flags'
+import { type GatewayFileSavePayload, registerFileSaveIpc } from './file-save-ipc'
 import {
   installFindShortcut,
   installFoundInPageForwarder,
@@ -268,9 +269,7 @@ import { downloadViaTokenToFile as downloadViaNativeGatewayToFile } from './gate
 import type {
   GatewayFileSaveContext,
   GatewayFileSaveDeps,
-  GatewayFileSaveResult,
-  GatewaySaveDialogOptions,
-  GatewaySaveDialogResult
+  GatewayFileSaveResult
 } from './gateway-file-download'
 import {
   finalizeGatewayDownload,
@@ -540,7 +539,6 @@ import { loadRendererLoadErrorPage } from './renderer-load-error-page'
 import { attachRendererConsoleCapture, formatRendererBoundaryReport } from './renderer-log'
 import { fetchRosterSourceData } from './roster-source-fetch'
 import { rosterSourceStatus } from './roster-source-status'
-import { registerSaveDialogIpc } from './save-text-file'
 import {
   classifyStoredSecret,
   readSecretStoragePolicy,
@@ -7462,14 +7460,6 @@ interface GatewayFileConnection extends RegistryBackendRequestScope {
   token?: null | string
 }
 
-interface GatewayFileSavePayload {
-  sessionId?: string
-  connectionId?: unknown
-  path?: unknown
-  profile?: unknown
-  suggestedName?: unknown
-}
-
 function gatewayFileRequestPath(
   connection: GatewayFileConnection,
   connectionId: null | string,
@@ -7481,7 +7471,10 @@ function gatewayFileRequestPath(
     : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
 }
 
-async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<GatewayFileSaveResult> {
+async function saveGatewayFile(
+  payload: GatewayFileSavePayload = {},
+  deps: GatewayFileSaveDeps
+): Promise<GatewayFileSaveResult> {
   const filePath = gatewayFilePath(payload.path)
 
   if (!filePath) {
@@ -7502,11 +7495,6 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
     requestPath => gatewayFileRequestPath(connection, connectionId, profile, requestPath),
     payload.sessionId
   )
-
-  const deps: GatewayFileSaveDeps = {
-    showSaveDialog: (options: GatewaySaveDialogOptions): Promise<GatewaySaveDialogResult> =>
-      dialog.showSaveDialog(mainWindow, options)
-  }
 
   return saveGatewayDownload(requestPaths, ctx, {
     ...deps,
@@ -16443,13 +16431,7 @@ ipcMain.handle('hermes:selectPaths', async (_event, options: any = {}) => {
 // Clipboard text read/write for the renderer (clipboard-ipc.ts).
 registerClipboardTextIpc(ipcMain, clipboard)
 
-// Save dialogs: the path picker (profile export) and /save's main-process write (save-text-file.ts).
-registerSaveDialogIpc(ipcMain, {
-  defaultDir: () => app.getPath('documents'),
-  showSaveDialog: options => dialog.showSaveDialog(mainWindow, options)
-})
-
-ipcMain.handle('hermes:saveGatewayFile', (_event, payload) => saveGatewayFile(payload))
+registerFileSaveIpc(saveGatewayFile)
 
 ipcMain.handle('hermes:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
 

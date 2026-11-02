@@ -29,8 +29,8 @@ export interface SaveTextFileDeps {
   writeFile?: (filePath: string, content: string) => Promise<void>
 }
 
-interface IpcMainLike {
-  handle: (channel: string, listener: (event: unknown, ...args: any[]) => unknown) => void
+interface IpcMainLike<Event> {
+  handle: (channel: string, listener: (event: Event, ...args: any[]) => unknown) => void
 }
 
 /** Rendered transcripts can be large; cap well above any realistic /save output. */
@@ -115,7 +115,11 @@ export async function selectSavePath(options: any, deps: SaveTextFileDeps): Prom
 }
 
 /** `hermes:selectSavePath` (path only) and `hermes:saveTextFileAs` (dialog + main-process write). */
-export function registerSaveDialogIpc(ipcMain: IpcMainLike, deps: SaveTextFileDeps): void {
-  ipcMain.handle('hermes:selectSavePath', (_event, options = {}) => selectSavePath(options, deps))
-  ipcMain.handle('hermes:saveTextFileAs', (_event, request) => saveTextFileAs(request || {}, deps))
+export function registerSaveDialogIpc<Event>(
+  ipcMain: IpcMainLike<Event>,
+  deps: SaveTextFileDeps | ((event: Event) => SaveTextFileDeps)
+): void {
+  const forEvent = (event: Event): SaveTextFileDeps => (typeof deps === 'function' ? deps(event) : deps)
+  ipcMain.handle('hermes:selectSavePath', (event, options = {}) => selectSavePath(options, forEvent(event)))
+  ipcMain.handle('hermes:saveTextFileAs', (event, request) => saveTextFileAs(request || {}, forEvent(event)))
 }
