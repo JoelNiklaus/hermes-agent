@@ -37,7 +37,7 @@ describe('csv and powerpoint preview', () => {
       })
     )
 
-    expect(slides).toEqual([{ paragraphs: ['Quarterly review', 'Revenue is up'], images: [] }])
+    expect(slides).toEqual([{ paragraphs: ['Quarterly review', 'Revenue is up'], images: [], notes: '', charts: [] }])
   })
 
   it('keeps a quoted comma inside one csv cell', () => {
