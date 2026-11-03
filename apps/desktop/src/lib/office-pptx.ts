@@ -1,11 +1,28 @@
 import { unzipSync } from 'fflate'
 
+export interface ChartSeries {
+  name: string
+  /** `null` where the chart has no value for that category. */
+  values: Array<number | null>
+}
+
+/** A chart's cached data (the numbers PowerPoint drew), not its styling. */
+export interface ChartPreview {
+  /** The plot element without its `Chart` suffix: `bar`, `line`, `pie`, `scatter`, ... */
+  kind: string
+  title: string
+  categories: string[]
+  series: ChartSeries[]
+}
+
 export interface SlidePreview {
   paragraphs: string[]
   images: string[]
+  /** Speaker notes; paragraphs are joined with `\n`, so a blank line stays visible. */
+  notes: string
+  charts: ChartPreview[]
 }
 
-const MAX_SLIDES = 40
 const MAX_UNZIPPED_BYTES = 32 * 1024 * 1024
 
 function textOf(bytes: Uint8Array | undefined): string {
@@ -72,9 +89,16 @@ function zipPath(base: string, target: string): string {
   return parts.join('/')
 }
 
-function relationships(files: Record<string, Uint8Array>, path: string): Map<string, string> {
+interface Relationship {
+  /** Zip path of the target part. */
+  target: string
+  /** The relationship type URI, e.g. `.../relationships/notesSlide`. */
+  type: string
+}
+
+function relationships(files: Record<string, Uint8Array>, path: string): Map<string, Relationship> {
   const document = parseXml(textOf(entry(files, path)))
-  const targets = new Map<string, string>()
+  const targets = new Map<string, Relationship>()
 
   if (!document) {
     return targets
@@ -85,7 +109,10 @@ function relationships(files: Record<string, Uint8Array>, path: string): Map<str
     const target = attribute(relationship, 'Target')
 
     if (id && target) {
-      targets.set(id, zipPath(path.replace(/_rels\/[^/]+\.rels$/, ''), target))
+      targets.set(id, {
+        target: zipPath(path.replace(/_rels\/[^/]+\.rels$/, ''), target),
+        type: attribute(relationship, 'Type') ?? ''
+      })
     }
   }
 
@@ -119,24 +146,134 @@ function dataUrl(bytes: Uint8Array, path: string): string | null {
   return `data:${mime};base64,${btoa(binary)}`
 }
 
+/** Text runs of one `a:p`; a soft line break (`a:br`) becomes `\n`. */
+function paragraphText(paragraph: Element): string {
+  return Array.from(paragraph.querySelectorAll('*'))
+    .filter(node => localName(node) === 't' || localName(node) === 'br')
+    .map(node => (localName(node) === 'br' ? '\n' : (node.textContent ?? '')))
+    .join('')
+}
+
 function slideText(document: Document): string[] {
   return descendants(document, 'p')
-    .map(paragraph =>
-      descendants(paragraph, 't')
-        .map(node => node.textContent ?? '')
-        .join('')
-        .trim()
-    )
+    .map(paragraph => paragraphText(paragraph).trim())
     .filter(Boolean)
 }
 
-function slideImages(document: Document, files: Record<string, Uint8Array>, slidePath: string): string[] {
-  const rels = relationships(files, slidePath.replace(/([^/]+)$/, '_rels/$1.rels'))
+/** Text of the notes page's body placeholder. The slide image and the slide
+ * number field are placeholders of their own and stay out. */
+function slideNotes(files: Record<string, Uint8Array>, rels: Map<string, Relationship>): string {
+  const notesPath = [...rels.values()].find(relationship => relationship.type.endsWith('/notesSlide'))?.target
+  const document = notesPath ? parseXml(textOf(entry(files, notesPath))) : null
+
+  if (!document) {
+    return ''
+  }
+
+  const body = descendants(document, 'sp').find(shape =>
+    descendants(shape, 'ph').some(placeholder => attribute(placeholder, 'type') === 'body')
+  )
+
+  return body ? descendants(body, 'p').map(paragraphText).join('\n').trim() : ''
+}
+
+function child(element: Element, name: string): Element | undefined {
+  return Array.from(element.children).find(node => localName(node) === name)
+}
+
+const CACHE_ELEMENTS = new Set(['strCache', 'numCache', 'strLit', 'numLit', 'lvl'])
+
+/** Cached points of a `c:tx`, `c:cat` or `c:val` reference, `undefined` where
+ * the cache skips an index. A multi-level category cache lists its innermost
+ * level first, which is the visible label. */
+function cachedPoints(reference: Element | undefined): Array<string | undefined> {
+  const cache = reference
+    ? Array.from(reference.querySelectorAll('*')).find(node => CACHE_ELEMENTS.has(localName(node)))
+    : undefined
+
+  if (!cache) {
+    return []
+  }
+
+  const points: Array<string | undefined> = []
+
+  for (const point of Array.from(cache.children).filter(node => localName(node) === 'pt')) {
+    const index = Number(attribute(point, 'idx'))
+
+    if (Number.isInteger(index) && index >= 0) {
+      points[index] = child(point, 'v')?.textContent ?? undefined
+    }
+  }
+
+  const count = Number(attribute(child(cache, 'ptCount') ?? cache, 'val'))
+
+  // Array.from turns the holes of a sparse array into undefined entries.
+  return Array.from(
+    { length: Math.max(points.length, Number.isInteger(count) ? count : 0) },
+    (_, index) => points[index]
+  )
+}
+
+function parseChart(document: Document): ChartPreview | null {
+  const plotArea = descendants(document, 'plotArea')[0]
+  const plot = plotArea ? Array.from(plotArea.children).find(node => /Chart$/.test(localName(node))) : undefined
+
+  if (!plot) {
+    return null
+  }
+
+  // Only the chart's own title: axis titles are `c:title` elements too.
+  const chartElement = descendants(document, 'chart')[0]
+  const title = chartElement ? child(chartElement, 'title') : undefined
+  const series = Array.from(plot.children).filter(node => localName(node) === 'ser')
+
+  return {
+    kind: localName(plot).replace(/Chart$/, ''),
+    title: title
+      ? descendants(title, 't')
+          .map(node => node.textContent ?? '')
+          .join('')
+          .trim()
+      : '',
+    categories: series[0]
+      ? cachedPoints(child(series[0], 'cat') ?? child(series[0], 'xVal')).map(label => label ?? '')
+      : [],
+    series: series.map(ser => ({
+      name: cachedPoints(child(ser, 'tx'))[0] ?? '',
+      values: cachedPoints(child(ser, 'val') ?? child(ser, 'yVal')).map(value =>
+        value === undefined || value.trim() === '' || !Number.isFinite(Number(value)) ? null : Number(value)
+      )
+    }))
+  }
+}
+
+function slideCharts(
+  document: Document,
+  files: Record<string, Uint8Array>,
+  rels: Map<string, Relationship>
+): ChartPreview[] {
+  const charts: ChartPreview[] = []
+
+  for (const reference of descendants(document, 'chart')) {
+    const id = attribute(reference, 'id')
+    const path = id ? rels.get(id)?.target : undefined
+    const chart = path ? parseXml(textOf(entry(files, path))) : null
+    const parsed = chart ? parseChart(chart) : null
+
+    if (parsed) {
+      charts.push(parsed)
+    }
+  }
+
+  return charts
+}
+
+function slideImages(document: Document, files: Record<string, Uint8Array>, rels: Map<string, Relationship>): string[] {
   const images: string[] = []
 
   for (const blip of descendants(document, 'blip')) {
     const id = attribute(blip, 'embed')
-    const path = id ? rels.get(id) : undefined
+    const path = id ? rels.get(id)?.target : undefined
     const bytes = path ? entry(files, path) : undefined
     const url = bytes && path ? dataUrl(bytes, path) : null
 
@@ -175,7 +312,7 @@ export function parsePptx(bytes: Uint8Array): SlidePreview[] {
     .map(slide => {
       const id = relationshipId(slide)
 
-      return id ? rels.get(id) : undefined
+      return id ? rels.get(id)?.target : undefined
     })
     .filter((path): path is string => Boolean(path))
 
@@ -183,14 +320,21 @@ export function parsePptx(bytes: Uint8Array): SlidePreview[] {
     .filter(path => /ppt\/slides\/slide\d+\.xml$/i.test(path))
     .sort()
 
-  const slides = (paths.length ? paths : fallback).slice(0, MAX_SLIDES).map(path => {
+  const slides = (paths.length ? paths : fallback).map(path => {
     const document = parseXml(textOf(entry(files, path)))
+    const slideRels = relationships(files, path.replace(/([^/]+)$/, '_rels/$1.rels'))
+    const notes = slideNotes(files, slideRels)
 
     if (!document) {
-      return { paragraphs: [], images: [] }
+      return { paragraphs: [], images: [], notes, charts: [] }
     }
 
-    return { paragraphs: slideText(document), images: slideImages(document, files, path) }
+    return {
+      paragraphs: slideText(document),
+      images: slideImages(document, files, slideRels),
+      notes,
+      charts: slideCharts(document, files, slideRels)
+    }
   })
 
   if (!slides.length) {

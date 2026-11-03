@@ -3,9 +3,68 @@ import { useEffect, useState } from 'react'
 
 import { docxPreviewDocument } from '@/lib/office-document'
 import { odtPreviewDocument } from '@/lib/office-odf'
-import { parsePptx, type SlidePreview } from '@/lib/office-pptx'
+import { type ChartPreview, parsePptx, type SlidePreview } from '@/lib/office-pptx'
 import { officeSourceName } from '@/lib/office-source'
 import { dataUrlBytes, parseSpreadsheet, type SheetPreview } from '@/lib/office-workbook'
+
+function ChartFigure({ chart }: { chart: ChartPreview }) {
+  const values = chart.series.flatMap(series => series.values).filter((value): value is number => value !== null)
+  const scale = Math.max(...values.map(Math.abs), 0) || 1
+
+  return (
+    <figure aria-label={chart.title || `${chart.kind} chart`} className="mt-4 text-[13px] leading-5">
+      {chart.title && <figcaption className="mb-2 font-medium text-[#555]">{chart.title}</figcaption>}
+      {chart.series.map((series, seriesIndex) => (
+        <div className="mb-3" key={seriesIndex}>
+          {chart.series.length > 1 && series.name && <div className="mb-1 text-[#666]">{series.name}</div>}
+          <div className="grid grid-cols-[minmax(0,12rem)_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1">
+            {series.values.map((value, pointIndex) => (
+              <div className="contents" key={pointIndex}>
+                <span className="text-[#444]">{chart.categories[pointIndex] ?? ''}</span>
+                <span
+                  className="h-3 rounded-sm bg-[#94a3b8]"
+                  style={{ width: `${(Math.abs(value ?? 0) / scale) * 100}%` }}
+                />
+                <span className="text-right tabular-nums text-[#222]">{value ?? ''}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </figure>
+  )
+}
+
+function SlideCard({ number, slide }: { number: number; slide: SlidePreview }) {
+  return (
+    <div className="mx-auto mb-6 max-w-3xl">
+      <article className="bg-white px-8 py-7 shadow-[0_1px_3px_rgba(0,0,0,0.22)]">
+        <div className="mb-3 text-[11px] font-medium tracking-wide text-[#888]">SLIDE {number}</div>
+        {slide.paragraphs.map((paragraph, paragraphIndex) => (
+          <p
+            className={paragraphIndex === 0 ? 'mb-3 text-2xl font-semibold' : 'mb-2 text-[15px] leading-6'}
+            key={paragraphIndex}
+          >
+            {paragraph}
+          </p>
+        ))}
+        {slide.images.map((src, imageIndex) => (
+          // Data URLs of one image type share their first bytes, so a prefix is no key.
+          <img alt="" className="mt-3 max-h-80 max-w-full" key={imageIndex} src={src} />
+        ))}
+        {slide.charts.map((chart, chartIndex) => (
+          <ChartFigure chart={chart} key={chartIndex} />
+        ))}
+      </article>
+      {slide.notes && (
+        <section aria-label="Speaker notes" className="border-t border-[#d4d4d4] bg-[#f7f7f7] px-8 py-4">
+          <div className="mb-1 text-[11px] font-medium tracking-wide text-[#888]">NOTES</div>
+          <p className="text-[14px] leading-6 whitespace-pre-wrap text-[#333]">{slide.notes}</p>
+        </section>
+      )}
+    </div>
+  )
+}
 
 function columnLabel(index: number): string {
   let n = index + 1
@@ -21,7 +80,11 @@ function columnLabel(index: number): string {
 }
 
 function isNumeric(value: string): boolean {
-  return /^-?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?$/.test(value) || /^-?\d+(?:\.\d+)?%?$/.test(value) || /^\d{4}-\d{2}-\d{2}/.test(value)
+  return (
+    /^-?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?$/.test(value) ||
+    /^-?\d+(?:\.\d+)?%?$/.test(value) ||
+    /^\d{4}-\d{2}-\d{2}/.test(value)
+  )
 }
 
 export function OfficePreview({
@@ -95,7 +158,9 @@ export function OfficePreview({
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">{error}</div>
+      <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+        {error}
+      </div>
     )
   }
 
@@ -107,23 +172,7 @@ export function OfficePreview({
     return (
       <div className="h-full overflow-auto bg-[#e7e6e6] px-4 py-6 text-[#222]">
         {slides.map((slide, index) => (
-          <article
-            className="mx-auto mb-6 max-w-3xl bg-white px-8 py-7 shadow-[0_1px_3px_rgba(0,0,0,0.22)]"
-            key={index}
-          >
-            <div className="mb-3 text-[11px] font-medium tracking-wide text-[#888]">SLIDE {index + 1}</div>
-            {slide.paragraphs.map((paragraph, paragraphIndex) => (
-              <p
-                className={paragraphIndex === 0 ? 'mb-3 text-2xl font-semibold' : 'mb-2 text-[15px] leading-6'}
-                key={paragraphIndex}
-              >
-                {paragraph}
-              </p>
-            ))}
-            {slide.images.map(src => (
-              <img alt="" className="mt-3 max-h-80 max-w-full" key={src.slice(0, 48)} src={src} />
-            ))}
-          </article>
+          <SlideCard key={index} number={index + 1} slide={slide} />
         ))}
       </div>
     )
