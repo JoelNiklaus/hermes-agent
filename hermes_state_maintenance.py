@@ -107,6 +107,22 @@ def _not_pinned_sql(alias: str = "s") -> str:
     return f"COALESCE({alias}.pinned, 0) = 0 AND {alias}.id NOT IN ({_PINNED_TAIL_SQL})"
 
 
+def _unread_tip_sql(alias: str = "s") -> str:
+    """Lineage tip *alias* is unread as the sidebar shows it (``SessionDB.session_unread`` on the
+    root-projected row): its activity postdates the lineage's read watermark.  Read marks stamp the
+    whole lineage, but a continuation published after the last mark starts with NULL, so the
+    watermark is the newest one on the tip or its compression ancestors (the root's).  NULL =
+    never tracked = read; 0 = marked unread."""
+    watermark = ("(WITH RECURSIVE _wm_up(id) AS ("
+                 f" SELECT {alias}.id"
+                 " UNION"
+                 " SELECT p.id FROM _wm_up u JOIN sessions c ON c.id = u.id"
+                 " JOIN sessions p ON p.id = c.parent_session_id"
+                 f" WHERE {_CONTINUATION_EDGE_SQL}"
+                 ") SELECT MAX(w.last_read_at) FROM sessions w JOIN _wm_up u ON w.id = u.id)")
+    return f"COALESCE({_sql_session_last_active(alias)} > {watermark}, 0)"
+
+
 class SessionMaintenanceMixin:
     """Retention pruning, stale-session archiving and VACUUM policy for SessionDB."""
 
@@ -310,7 +326,9 @@ class SessionMaintenanceMixin:
         stale tip archives its chain via :meth:`set_session_archived`, so an old compressed-away
         root with a recent continuation is never matched.  The hidden canonical Bot Chat (same
         predicate as :meth:`set_session_pinned`) is exempt: only a deliberate archive may retire
-        it, since archiving releases its registry title to the next Bot open."""
+        it, since archiving releases its registry title to the next Bot open.  Unread chats
+        (:meth:`session_unread`) are exempt however long they idle: hiding one would bury a reply
+        the user has not seen."""
         if idle_days is None or idle_days < 0:
             return 0
         cutoff = time.time() - float(idle_days) * 86400.0
@@ -323,6 +341,7 @@ class SessionMaintenanceMixin:
               {pin_clause}
               AND NOT (COALESCE(s.hidden, 0) <> 0 AND COALESCE(s.title, '') = ?)
               AND {_LAST_ACTIVE_SQL} < ?
+              AND NOT {_unread_tip_sql("s")}
             ORDER BY s.started_at ASC
             """, (self.CANONICAL_BOT_CHAT_TITLE, cutoff))
         for row in rows:
