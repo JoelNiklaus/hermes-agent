@@ -680,7 +680,9 @@ unarchived from the Desktop/Dashboard session list.
 A chat hidden by the `sessions.auto_archive` idle sweep comes back on its own
 once it is live again — when it is resumed, or when new activity compresses it
 into a fresh continuation. A chat you archived yourself (sidebar, API, or
-`hermes sessions archive`) stays archived until you unarchive it.
+`hermes sessions archive`) stays archived until you unarchive it. The sweep
+never archives an unread chat (a reply you have not opened, or a chat you
+marked unread), however long it sits.
 
 ### Session Statistics
 

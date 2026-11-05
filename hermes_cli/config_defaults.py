@@ -2267,7 +2267,7 @@ DEFAULT_CONFIG = {
         # Inactive days of ended-session history to keep (= `hermes sessions prune`).
         "retention_days": 90,
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
-        # once per min_interval_hours. Pinned sessions are exempt.
+        # once per min_interval_hours. Pinned and unread sessions are exempt.
         "auto_archive": False,
         # Idle days before auto-archive hides a session (only when auto_archive is true).
         "auto_archive_days": 3,
