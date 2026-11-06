@@ -90,6 +90,31 @@ def test_first_page_that_appears_gets_the_supervisor_session():
     assert ("Page.enable", {}, "S1") in browser.calls
 
 
+def test_a_page_closed_before_the_attach_landed_leaves_the_next_page_its_chance():
+    browser = _FakeBrowser(pages=[])
+    real_cdp = browser.cdp
+
+    async def cdp(method, params=None, **kwargs):
+        params = params or {}
+        if method == "Target.attachToTarget" and params.get("targetId") == "GONE":
+            browser.calls.append((method, dict(params), None))
+            raise RuntimeError("No target with given id found")
+        return await real_cdp(method, params, **kwargs)
+
+    sup = _supervisor(browser)
+    sup._cdp = cdp
+
+    async def scenario():
+        await sup._attach_initial_page()
+        await _created(sup, "page", "GONE")
+        await _created(sup, "page", "NEXT")
+
+    asyncio.run(scenario())
+
+    assert browser.attached() == ["GONE", "NEXT"]
+    assert sup._page_session_id == "S1"
+
+
 def test_existing_page_is_attached_as_before():
     browser = _FakeBrowser(pages=["USER-TAB"])
     sup = _supervisor(browser)
