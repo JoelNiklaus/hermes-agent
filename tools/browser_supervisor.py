@@ -127,6 +127,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         self._pending_calls: dict[int, asyncio.Future] = {}
         self._ws: Optional[ClientConnection] = None
         self._page_session_id: Optional[str] = None
+        self._attaching_page = False  # a Target.targetCreated attach is in flight (loop-only)
         # Dialog auto-dismiss watchdog handles (per dialog id) + id generator.
         self._dialog_watchdogs: dict[str, asyncio.TimerHandle] = {}
         self._dialog_seq = 0
@@ -438,15 +439,39 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             backoff = min(backoff * 2, 10.0)
 
     async def _attach_initial_page(self) -> None:
-        """Find (or create) a page target, attach flattened, enable domains, install dialog bridge."""
+        """Attach to the first page target, enable domains, install the dialog bridge. A browser with no
+        page (``--no-startup-window``, every tab closed) gets no tab of ours: nothing would ever close it,
+        and every supervisor starting there added one. Target discovery attaches the first page that
+        appears instead (:meth:`_on_target_created`)."""
         targets = (await self._cdp("Target.getTargets")).get("result", {}).get("targetInfos", [])
         page_target = next((t for t in targets if t.get("type") == "page"), None)
         if page_target is None:
-            page_target = (await self._cdp("Target.createTarget", {"url": "about:blank"}))["result"]
-        attach = await self._cdp("Target.attachToTarget", {"targetId": page_target["targetId"], "flatten": True})
+            await self._cdp("Target.setDiscoverTargets", {"discover": True})
+            return
+        await self._attach_page(page_target["targetId"])
+
+    async def _attach_page(self, target_id: str) -> None:
+        attach = await self._cdp("Target.attachToTarget", {"targetId": target_id, "flatten": True})
         self._page_session_id = sid = attach["result"]["sessionId"]
         await self._enable_page_domains(sid, timeout=10.0)
         await self._install_dialog_bridge(sid)
+
+    def _on_target_created(self, params: dict[str, Any], session_id: Optional[str] = None) -> None:
+        """The first page on a browser that had none becomes the supervisor's page session."""
+        info = params.get("targetInfo") or {}
+        if info.get("type") != "page" or self._page_session_id is not None or self._attaching_page:
+            return
+        self._attaching_page = True
+
+        async def attach() -> None:
+            try:
+                await self._attach_page(info["targetId"])
+            except Exception as e:  # closed before the attach landed: the next page gets its chance
+                logger.debug("CDP supervisor %s: attaching new page failed: %s", self.task_id, e)
+            finally:
+                self._attaching_page = False
+        # Off-loop: awaiting the replies here would deadlock, only the reader resolves those Futures.
+        asyncio.create_task(attach())
 
     async def _cdp(self, method: str, params: Optional[dict[str, Any]] = None, *,
                    session_id: Optional[str] = None, timeout: Optional[float] = 10.0) -> dict[str, Any]:
@@ -494,7 +519,8 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
     # CDP event → handler(self, params, session_id). Async handlers return an
     # awaitable that ``_read_loop`` awaits; sync handlers return None.
     _EVENT_HANDLERS: dict[str, Callable[..., Any]] = {
-        **DialogSupervisionMixin.EVENT_HANDLERS, **FrameTrackingMixin.EVENT_HANDLERS
+        **DialogSupervisionMixin.EVENT_HANDLERS, **FrameTrackingMixin.EVENT_HANDLERS,
+        "Target.targetCreated": _on_target_created,
     }
 
 
