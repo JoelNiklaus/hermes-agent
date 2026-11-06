@@ -97,8 +97,8 @@ class SupervisorSnapshot:
 
 class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
     """One supervisor per (task_id, cdp_url) pair. ``start()`` spawns a daemon thread
-    running its own asyncio loop, connects, attaches to the first page target, enables
-    domains and auto-attach. ``snapshot()`` / ``respond_to_dialog()`` / ``evaluate_runtime()``
+    running its own asyncio loop, connects, attaches to the first page target (on a browser
+    with none, to the first page that appears), enables domains and auto-attach. ``snapshot()`` / ``respond_to_dialog()`` / ``evaluate_runtime()``
     are sync, thread-safe bridges onto that loop; all CDP I/O lives on the loop."""
 
     def __init__(self, task_id: str, cdp_url: str, *, dialog_policy: str = DEFAULT_DIALOG_POLICY,
@@ -127,7 +127,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         self._pending_calls: dict[int, asyncio.Future] = {}
         self._ws: Optional[ClientConnection] = None
         self._page_session_id: Optional[str] = None
-        self._attaching_page = False  # a Target.targetCreated attach is in flight (loop-only)
+        self._page_attach: Optional[asyncio.Task] = None  # Target.targetCreated attach in flight (loop-only)
         # Dialog auto-dismiss watchdog handles (per dialog id) + id generator.
         self._dialog_watchdogs: dict[str, asyncio.TimerHandle] = {}
         self._dialog_seq = 0
@@ -277,13 +277,6 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         if loop is None or not loop.is_running():
             return _fail("supervisor loop is not running")
 
-        async def _attach(target_id: str) -> str:
-            attach = await self._cdp("Target.attachToTarget", {"targetId": target_id, "flatten": True}, timeout=timeout)
-            sid = attach["result"]["sessionId"]
-            await self._enable_page_domains(sid, timeout=timeout)
-            await self._install_dialog_bridge(sid)
-            return sid
-
         async def _focus() -> dict[str, Any]:
             from agent.vault_store import normalize_origin
             targets = (await self._cdp("Target.getTargets", timeout=timeout)).get("result", {}).get("targetInfos", [])
@@ -298,7 +291,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                 except Exception:
                     continue
             for target_id, url in candidates:
-                sid = await _attach(target_id)
+                sid = await self._open_page_session(target_id, timeout=timeout)
                 if accept:
                     probe = await self._cdp("Runtime.evaluate", {"expression": accept, "returnByValue": True},
                                             session_id=sid, timeout=timeout)
@@ -450,28 +443,35 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             return
         await self._attach_page(page_target["targetId"])
 
-    async def _attach_page(self, target_id: str) -> None:
-        attach = await self._cdp("Target.attachToTarget", {"targetId": target_id, "flatten": True})
-        self._page_session_id = sid = attach["result"]["sessionId"]
-        await self._enable_page_domains(sid, timeout=10.0)
+    async def _open_page_session(self, target_id: str, *, timeout: float = 10.0) -> str:
+        """Attach flattened to one page, enable its domains, install the dialog bridge; its session id."""
+        attach = await self._cdp("Target.attachToTarget", {"targetId": target_id, "flatten": True}, timeout=timeout)
+        sid = attach["result"]["sessionId"]
+        await self._enable_page_domains(sid, timeout=timeout)
         await self._install_dialog_bridge(sid)
+        return sid
+
+    async def _attach_page(self, target_id: str) -> None:
+        sid = await self._open_page_session(target_id)
+        with self._state_lock:
+            self._page_session_id = sid
 
     def _on_target_created(self, params: dict[str, Any], session_id: Optional[str] = None) -> None:
         """The first page on a browser that had none becomes the supervisor's page session."""
         info = params.get("targetInfo") or {}
-        if info.get("type") != "page" or self._page_session_id is not None or self._attaching_page:
+        if info.get("type") != "page" or self._page_session_id is not None:
             return
-        self._attaching_page = True
-
-        async def attach() -> None:
-            try:
-                await self._attach_page(info["targetId"])
-            except Exception as e:  # closed before the attach landed: the next page gets its chance
-                logger.debug("CDP supervisor %s: attaching new page failed: %s", self.task_id, e)
-            finally:
-                self._attaching_page = False
+        if self._page_attach is not None and not self._page_attach.done():
+            return
         # Off-loop: awaiting the replies here would deadlock, only the reader resolves those Futures.
-        asyncio.create_task(attach())
+        # The attribute also holds the task: the loop keeps only a weak reference to it.
+        self._page_attach = asyncio.create_task(self._attach_new_page(info["targetId"]))
+
+    async def _attach_new_page(self, target_id: str) -> None:
+        try:
+            await self._attach_page(target_id)
+        except Exception as e:  # closed before the attach landed: the next page gets its chance
+            logger.debug("CDP supervisor %s: attaching new page failed: %s", self.task_id, e)
 
     async def _cdp(self, method: str, params: Optional[dict[str, Any]] = None, *,
                    session_id: Optional[str] = None, timeout: Optional[float] = 10.0) -> dict[str, Any]:
