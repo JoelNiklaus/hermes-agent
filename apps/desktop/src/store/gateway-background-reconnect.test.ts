@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { HermesGateway } from '@/api/client'
 
+import { connectionWire } from './connection-wire'
 import {
   activeGateway,
   activeGatewayConnectionId,
@@ -53,6 +54,7 @@ class NetworkSocket extends EventTarget {
 
       this.readyState = NetworkSocket.OPEN
       this.dispatchEvent(new Event('open'))
+      // A real gateway's first frame after accept; empty = a legacy (non-authority) peer.
       this.receive({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
     }, 1)
   }
@@ -204,6 +206,8 @@ describe('background remote turn reconnect', () => {
       expect.objectContaining({ method: 'prompt.submit', params: expect.objectContaining({ session_id: sessionId }) })
     ])
     expect(liveSecondaryConnectionIds()).toEqual(new Set([owner.connectionId]))
+    // The secondary publishes the wire its owner connection negotiated, which the composer reads.
+    expect(connectionWire(owner.connectionId)).toBe('legacy')
     const started = publish('message.start', {})
     expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ ...started, connectionId: owner.connectionId }))
     onEvent.mockClear()

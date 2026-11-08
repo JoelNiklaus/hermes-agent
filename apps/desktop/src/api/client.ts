@@ -1,4 +1,5 @@
 import {
+  type ConnectionState,
   type GatewayEvent,
   type GatewayEventName,
   JsonRpcGatewayClient,
@@ -10,6 +11,7 @@ import { map, type MapStore } from 'nanostores'
 import type { HermesApiRequest } from '@/global'
 
 import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
+import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } from './dial-readiness'
 
 // Desktop startup fires a burst of read-only data calls (config, profiles,
 // model info/options, cron) the moment the backend passes readiness. On a
@@ -34,7 +36,7 @@ const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
 // ever fires when the turn itself would have been abandoned server-side.
 export const PROMPT_SUBMIT_REQUEST_TIMEOUT_MS = 1_800_000
 
-export const GATEWAY_NOT_CONNECTED_MESSAGE = 'Hermes gateway is not connected'
+export { GATEWAY_NOT_CONNECTED_MESSAGE }
 
 // Canonical shared prompts (`gateway/session_pending_controls.py`) travel as
 // `approval.request` / `clarify.request` EVENTS keyed by `prompt_id` and are
@@ -48,6 +50,8 @@ const ATTACH_REQUIRED = new Set([
   'approval.respond',
   'clarify.respond',
   'session.interrupt',
+  'session.redirect',
+  'session.steer',
   'prompt.cancel',
   'session.rewind',
   'prompt.steer_queued',
@@ -86,45 +90,12 @@ function requestDeadline(timeoutMs: number | undefined): number {
   return budget > 0 ? Date.now() + budget : Number.POSITIVE_INFINITY
 }
 
-function remainingRequestBudget(deadline: number, signal?: AbortSignal): number {
-  signal?.throwIfAborted()
-
-  if (deadline === Number.POSITIVE_INFINITY) { return 0 }
-  const remaining = deadline - Date.now()
-
-  if (remaining <= 0) { throw new Error('Hermes gateway request timed out') }
-
-  return remaining
-}
-
-// Waiting for the connection spends the caller's budget, but expiry must not
-// reject the shared handshake or prevent another request from using the socket.
-function waitForProtocolReady(ready: Promise<void>, deadline: number, signal?: AbortSignal): Promise<void> {
-  const timeoutMs = remainingRequestBudget(deadline, signal)
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let onAbort: (() => void) | undefined
-
-  const stopped = new Promise<void>((_resolve, reject) => {
-    if (timeoutMs > 0) { timer = setTimeout(() => reject(new Error('Hermes gateway request timed out')), timeoutMs) }
-
-    if (signal) {
-      onAbort = () => reject(signal.reason)
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-  })
-
-  return Promise.race([ready, stopped]).finally(() => {
-    clearTimeout(timer)
-
-    if (onAbort) { signal?.removeEventListener('abort', onAbort) }
-  })
-}
+export type GatewaySessionWire = 'canonical' | 'legacy'
 
 export class HermesGateway extends JsonRpcGatewayClient {
   private canonical = false
   private nativeDial = false
-  private protocolReady: Promise<void> = Promise.resolve()
-  private rejectProtocolReady: ((error: Error) => void) | null = null
+  private readonly readiness = new DialReadiness(() => super.connectionState === 'open')
   private readonly protocol = new CanonicalDesktopProtocol()
   private readonly promptHandlers = new Set<ServerRequestHandler>()
   // A stored ID can exist in several profile islands (for example after import).
@@ -212,7 +183,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
   }
 
   override close(): void {
-    this.rejectProtocolReady?.(new Error('Hermes gateway connection closed before protocol readiness'))
+    this.readiness.fail()
     this.connectionGeneration++
     this.deliveredPrompts.clear()
     this.sessionProfiles.clear()
@@ -246,10 +217,6 @@ export class HermesGateway extends JsonRpcGatewayClient {
   }
 
   private deliverNormalized(event: GatewayEvent, handler: (event: GatewayEvent) => void): void {
-    if (event.type === 'gateway.ready' && (event.payload as { session_authority?: unknown } | undefined)?.session_authority === true) {
-      this.canonical = true
-    }
-
     const key = JSON.stringify([event.session_id, event.replay_epoch])
     // While an owner probe for this (session, epoch) runs, its frames wait and deliver in order.
     const parked = this.canonical && event.session_id ? this.parkedFrames.get(key) : undefined
@@ -362,8 +329,30 @@ export class HermesGateway extends JsonRpcGatewayClient {
     return this.nativeDial
   }
 
+  /** The session wire this connection negotiated; null until its readiness settles. */
+  get sessionWire(): GatewaySessionWire | null {
+    return this.readiness.ready ? (this.canonical ? 'canonical' : 'legacy') : null
+  }
+
+  // `open` is reported once the wire is known; a socket waiting for readiness is still connecting.
+  override get connectionState(): ConnectionState {
+    const state = super.connectionState
+
+    return state === 'open' && !this.readiness.ready ? 'connecting' : state
+  }
+
+  override onState(handler: (state: ConnectionState) => void): () => void {
+    const { deliver, release } = this.readiness.hold(handler)
+    const off = super.onState(deliver)
+
+    return () => {
+      release()
+      off()
+    }
+  }
+
   override async connect(wsUrl: string): Promise<void> {
-    if (this.connectionState === 'open' || this.connectionState === 'connecting') { return this.protocolReady }
+    if (this.connectionState === 'open' || this.connectionState === 'connecting') { return this.readiness.promise }
     const generation = ++this.connectionGeneration
     this.nativeDial = new URL(wsUrl).searchParams.has('native_dial')
     this.canonical = this.nativeDial
@@ -376,43 +365,18 @@ export class HermesGateway extends JsonRpcGatewayClient {
     this.reconciledEpochs.clear()
     this.parkedFrames.clear()
 
-    let rejectReady: (error: Error) => void = () => {}
-
-    let stopReady = () => {}
-
-    let stopState = () => {}
-    let timer: ReturnType<typeof setTimeout> | undefined
-
-    const ready = this.nativeDial ? Promise.resolve() : new Promise<void>((resolve, reject) => {
-      rejectReady = reject
-      stopReady = this.on('gateway.ready', () => resolve())
-      timer = setTimeout(() => reject(new Error('Hermes gateway protocol readiness timed out')), DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS)
-    })
-
-    this.protocolReady = ready
-    this.rejectProtocolReady = rejectReady
+    const ready = this.readiness.begin(generation, this.nativeDial)
 
     try {
-      const transport = super.connect(wsUrl)
-      stopState = this.onState(state => {
-        // A closed observer can redial while the shared client visits its live listener set.
-        // Reject the old handshake, but do not apply that old event to the replacement.
-        if (state === 'closed' && (generation !== this.connectionGeneration || this.connectionState === 'closed')) {
-          rejectReady(new Error('Hermes gateway disconnected before protocol readiness'))
-        }
-      })
-      await Promise.all([transport, ready])
+      // The transport's own rejection names a dial that never opened (#41566); readiness only
+      // speaks for a socket that did.
+      await super.connect(wsUrl)
+      await ready
     } catch (error) {
-      rejectReady(error instanceof Error ? error : new Error('Hermes gateway connection failed'))
+      this.readiness.failDial(ready, error instanceof Error ? error : new Error(GATEWAY_NOT_CONNECTED_MESSAGE))
 
       if (generation === this.connectionGeneration) { this.invalidate('Hermes gateway protocol negotiation failed') }
       throw error
-    } finally {
-      clearTimeout(timer)
-      stopReady()
-      stopState()
-
-      if (this.rejectProtocolReady === rejectReady) { this.rejectProtocolReady = null }
     }
   }
 
@@ -458,31 +422,21 @@ export class HermesGateway extends JsonRpcGatewayClient {
   }
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
-    const deadline = requestDeadline(timeoutMs)
     const generation = this.connectionGeneration
-    await waitForProtocolReady(this.protocolReady, deadline, signal)
-    this.requireConnectionGeneration(generation)
+    const deadline = requestDeadline(timeoutMs)
+
+    // Once readiness has settled (always, on a native dial) a request sends at once, as on main.
+    if (!this.readiness.ready) {
+      // The channel's own timeout text, which callers match (`plugins.manage`'s timedOut).
+      const seconds = Math.round((timeoutMs ?? DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS) / 1000)
+      await this.readiness.wait(deadline, signal, () => new Error(`request timed out after ${seconds}s: ${method}`))
+      this.requireConnectionGeneration(generation)
+    }
 
     if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), remainingRequestBudget(deadline, signal), signal) }
-    // A truncating submit (edit / regenerate / restore) is the owner's rewind, then the submit.
-    const rewind = method === 'prompt.submit' ? splitRewindSubmit(params) : null
+    const redirected = this.canonicalRedirect<T>(method, params, deadline, signal)
 
-    if (rewind) {
-      if (rewind.rewind) { await this.request('session.rewind', rewind.rewind, remainingRequestBudget(deadline, signal), signal) }
-
-      return this.request<T>('prompt.submit', rewind.submit, remainingRequestBudget(deadline, signal), signal)
-    }
-
-    // A question's owner is immutable even when a second profile attaches an
-    // equal stored session ID while the first card remains open.
-    const promptOwner = method === 'clarify.lock' ? this.deliveredPrompts.get(String(params.request_id ?? '')) : undefined
-
-    if (promptOwner) {
-      const answer = typeof params.answer === 'string' ? params.answer : ''
-
-      return this.request<T>('clarify.respond', { session_id: promptOwner.sessionId, profile: promptOwner.profile, request_id: params.request_id, answer }, remainingRequestBudget(deadline, signal), signal)
-    }
-
+    if (redirected) { return redirected }
     params = this.routeCanonicalParams(method, params)
 
     await this.attachForRequest(method, params, deadline, signal)
@@ -546,6 +500,29 @@ export class HermesGateway extends JsonRpcGatewayClient {
     }
   }
 
+  // Requests the canonical wire answers as other requests: a truncating submit (edit / regenerate /
+  // restore) is the owner's rewind, then the submit; a clarify lock is the prompt owner's respond.
+  private canonicalRedirect<T>(method: string, params: Record<string, unknown>, deadline: number, signal?: AbortSignal): Promise<T> | null {
+    const rewind = method === 'prompt.submit' ? splitRewindSubmit(params) : null
+
+    if (rewind) {
+      return (async () => {
+        if (rewind.rewind) { await this.request('session.rewind', rewind.rewind, remainingRequestBudget(deadline, signal), signal) }
+
+        return this.request<T>('prompt.submit', rewind.submit, remainingRequestBudget(deadline, signal), signal)
+      })()
+    }
+
+    // A question's owner is immutable even when a second profile attaches an
+    // equal stored session ID while the first card remains open.
+    const promptOwner = method === 'clarify.lock' ? this.deliveredPrompts.get(String(params.request_id ?? '')) : undefined
+
+    if (!promptOwner) { return null }
+    const answer = typeof params.answer === 'string' ? params.answer : ''
+
+    return this.request<T>('clarify.respond', { session_id: promptOwner.sessionId, profile: promptOwner.profile, request_id: params.request_id, answer }, remainingRequestBudget(deadline, signal), signal)
+  }
+
   private requireConnectionGeneration(generation: number): void {
     if (generation !== this.connectionGeneration) { throw new Error('Hermes gateway connection changed; reopen the session') }
   }
@@ -602,12 +579,20 @@ export class HermesGateway extends JsonRpcGatewayClient {
       // The channel already answered -32603; surface the crash in devtools like the dial-failure sink.
       onRequestHandlerError: (error, request) =>
         console.error(`[gateway] server request handler crashed for ${request.method} (${request.id}):`, error),
+      onUncorrelatedError: error =>
+        console.error(`[gateway] error frame with no request id (code ${error.code ?? 'none'}): ${error.message}`),
       // The channel already answered -32601; note the missing registry in devtools.
       onUnhandledRequest: request =>
         console.warn(`[gateway] Hermes Desktop has no server-request registry for ${request.method} (${request.id})`),
       requestTimeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
       socketFactory: openGatewaySocket
     })
+    // The wire follows the peer's explicit advertisement, read before any subscriber runs; a
+    // native dial is canonical by provenance.
+    super.on('gateway.ready', event => this.readiness.adoptReady(this.connectionGeneration, () => {
+      this.canonical = event.payload?.session_authority === true
+    }))
+    super.onState(state => this.readiness.trackTransport(state))
     this.onEvent(event => {
       if (!this.canonical) { return }
 

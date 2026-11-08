@@ -36,6 +36,47 @@ beforeEach(() => {
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
+test('a canonical clarify redirect spends the readiness wait inside the original request deadline', async () => {
+  const client = new HermesGateway()
+  const connected = client.connect('ws://fixture/api/ws?token=fixture')
+  void connected.catch(() => {})
+  const socket = ControlledSocket.instances[0]
+  socket.open()
+  const delivered = vi.fn()
+  client.onRequest(delivered)
+  let result = 'pending'
+
+  const request = client.request('clarify.lock', { request_id: 'question', answer: 'staging' }, 20)
+    .then(() => { result = 'answered' }, error => { result = error.message })
+
+  try {
+    expect(client.connectionState).toBe('connecting')
+    expect(client.sessionWire).toBeNull()
+    await vi.advanceTimersByTimeAsync(12)
+    socket.ready(true)
+    // The owner can replay its pending card in the same frame batch as readiness,
+    // before the waiting request resumes and resolves clarify.lock to its owner.
+    socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+      jsonrpc: '2.0', method: 'event', params: {
+        type: 'clarify.request', session_id: 'chat', payload: {
+          prompt_id: 'question', execution_generation: 7, question: 'Which target?', choices: ['staging']
+        }
+      }
+    }) }))
+    socket.answer = false
+    await connected
+    await vi.advanceTimersByTimeAsync(0)
+    expect(delivered).toHaveBeenCalledOnce()
+    expect(socket.frames.at(-1)).toMatchObject({ method: 'session.resume', params: { session_id: 'chat', profile: 'default' } })
+    expect(result).toBe('pending')
+    await vi.advanceTimersByTimeAsync(9)
+    expect(result).toContain('timed out')
+    await request
+    expect(socket.frames.some(frame => frame.method === 'clarify.respond')).toBe(false)
+    expect(client.connectionState).toBe('open')
+  } finally { client.close() }
+})
+
 test.each([true, false])('request expiry prevents a late write without cancelling readiness (canonical=%s)', async canonical => {
   const client = new HermesGateway()
   const connected = client.connect('ws://fixture/api/ws?token=fixture')

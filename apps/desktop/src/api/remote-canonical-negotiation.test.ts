@@ -3,13 +3,9 @@ import type { IncomingMessage } from 'node:http'
 
 import { expect, test, vi } from 'vitest'
 
-import { HermesGateway } from './client'
+import { type FixtureFrame, type FixtureSocket, listen, publicUrl, readyFrame, reply, shut, transportOpened } from '../test/ws-gateway-fixture'
 
-interface FixtureSocket {
-  on(event: 'message', handler: (bytes: Buffer) => void): void
-  send(data: string): void
-  terminate(): void
-}
+import { HermesGateway } from './client'
 
 const snapshot = {
   session_id: 'chat', stored_session_id: 'chat', messages: [], prompts: [], pending: [],
@@ -18,45 +14,31 @@ const snapshot = {
 }
 
 test('a public authenticated canonical gateway retains the attached profile and prepares submissions', async () => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
-  const frames: Array<{ method: string; params: Record<string, unknown> }> = []
+  const server = await listen()
+  const frames: FixtureFrame[] = []
   let protocol: unknown
   server.on('connection', (socket: FixtureSocket, request: IncomingMessage) => {
     protocol = request.headers['sec-websocket-protocol']
     socket.on('message', bytes => {
       const frame = JSON.parse(bytes.toString())
       frames.push(frame)
-      let result: unknown = {}
 
-      if (frame.method === 'session.resume') {result = snapshot}
+      if (frame.method === 'prompt.submit' && (frame.params.profile !== 'engineer' || typeof frame.params.submission_id !== 'string')) {
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, error: { code: 4001, message: 'permission_denied' } }))
 
-      if (frame.method === 'prompt.submit') {
-        if (frame.params.profile !== 'engineer' || typeof frame.params.submission_id !== 'string') {
-          socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, error: { code: 4001, message: 'permission_denied' } }))
-
-          return
-        }
-
-        result = { admission_id: 'admission', ref: { session_id: 'chat' }, sequence: 1,
-          status: 'queued', outcome: null, authority_epoch: 1, execution_generation: 1 }
+        return
       }
 
-      socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result }))
+      reply(socket, frame, frame.method === 'session.resume' ? snapshot : frame.method === 'prompt.submit'
+        ? { admission_id: 'admission', ref: { session_id: 'chat' }, sequence: 1, status: 'queued', outcome: null, authority_epoch: 1, execution_generation: 1 }
+        : {})
     })
-    socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: {
-      type: 'gateway.ready', payload: { session_authority: true }
-    } }))
+    socket.send(readyFrame())
   })
   const client = new HermesGateway()
-  const ready = new Promise<void>(resolve => client.on('gateway.ready', () => resolve()))
 
   try {
-    const address = server.address() as { port: number }
-    await client.connect(`ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`)
-    await ready
+    await client.connect(publicUrl(server))
     await client.request('session.resume', { session_id: 'chat', profile: 'engineer' })
     await expect(client.request('prompt.submit', { session_id: 'chat', text: 'fixture input' })).resolves.toMatchObject({ status: 'queued' })
     expect(frames.find(frame => frame.method === 'prompt.submit')?.params).toMatchObject({
@@ -64,18 +46,12 @@ test('a public authenticated canonical gateway retains the attached profile and 
     })
     expect(protocol).toBeUndefined()
   } finally {
-    client.close()
-
-    for (const socket of server.clients) {socket.terminate()}
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
 
 test.each([{}, { session_authority: false }, { session_authority: 'true' }])('a reconnect resets protocol selection for a non-canonical advertisement %j', async advertisement => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
+  const server = await listen()
   const creates: Record<string, unknown>[] = []
   let connection = 0
   server.on('connection', (socket: FixtureSocket) => {
@@ -84,48 +60,36 @@ test.each([{}, { session_authority: false }, { session_authority: 'true' }])('a 
       const frame = JSON.parse(bytes.toString())
 
       if (frame.method === 'session.create') {creates.push(frame.params)}
-      socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: {} }))
+      reply(socket, frame)
     })
-    socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: {
-      type: 'gateway.ready', payload: canonical ? { session_authority: true } : advertisement
-    } }))
+    socket.send(readyFrame(canonical ? { session_authority: true } : advertisement))
   })
   const client = new HermesGateway()
-  const address = server.address() as { port: number }
-  const url = `ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`
-  let ready = new Promise<void>(resolve => client.on('gateway.ready', () => resolve()))
+  const url = publicUrl(server)
 
   try {
     await client.connect(url)
-    await ready
     await client.request('session.create', { source: 'desktop', cols: 80, request_id: 'first' })
     expect(creates[0]).toHaveProperty('request_id', 'first')
     client.close()
-    ready = new Promise<void>(resolve => client.on('gateway.ready', () => resolve()))
     await client.connect(url)
-    await ready
+    expect(client.sessionWire).toBe('legacy')
     await client.request('session.create', { source: 'desktop', cols: 80, request_id: 'second' })
     expect(creates[1]).not.toHaveProperty('request_id')
   } finally {
-    client.close()
-
-    for (const socket of server.clients) {socket.terminate()}
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
 
+// Whoever closes it, an opened socket that never became ready fails its dial with one text, which
+// names the closed connection the way the transport does.
 test.each(['viewer', 'peer'] as const)('%s disconnect rejects an unfinished public protocol handshake', async closer => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
+  const server = await listen()
   let peer: FixtureSocket | undefined
   server.on('connection', (socket: FixtureSocket) => { peer = socket })
   const client = new HermesGateway()
-  const opened = new Promise<void>(resolve => client.onState(state => { if (state === 'open') { resolve() } }))
-  const address = server.address() as { port: number }
-  const connected = client.connect(`ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`)
-  const rejected = expect(connected).rejects.toThrow('before protocol readiness')
+  const opened = transportOpened(client)
+  const rejected = expect(client.connect(publicUrl(server))).rejects.toThrow('Hermes gateway connection closed before protocol readiness')
 
   try {
     await opened
@@ -133,18 +97,12 @@ test.each(['viewer', 'peer'] as const)('%s disconnect rejects an unfinished publ
     if (closer === 'viewer') { client.close() } else { peer?.terminate() }
     await rejected
   } finally {
-    client.close()
-
-    for (const socket of server.clients) { socket.terminate() }
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
 
 test('a public readiness timeout closes the failed transport and permits redial', async () => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
+  const server = await listen()
   let connections = 0
   server.on('connection', (socket: FixtureSocket) => {
     if (++connections > 1) {
@@ -159,9 +117,8 @@ test('a public readiness timeout closes the failed transport and permits redial'
     })
   })
   const client = new HermesGateway()
-  const address = server.address() as { port: number }
-  const url = `ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`
-  const opened = new Promise<void>(resolve => client.onState(state => { if (state === 'open') { resolve() } }))
+  const url = publicUrl(server)
+  const opened = transportOpened(client)
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
   try {
@@ -175,19 +132,13 @@ test('a public readiness timeout closes the failed transport and permits redial'
     await expect(client.request('ping')).resolves.toEqual({})
     expect(connections).toBe(2)
   } finally {
-    client.close()
     vi.useRealTimers()
-
-    for (const socket of server.clients) { socket.terminate() }
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
 
 test('requests made at transport open wait for public protocol readiness', async () => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
+  const server = await listen()
   const frames: Array<{ method: string; params: Record<string, unknown> }> = []
 
   let announceReady = () => {}
@@ -203,9 +154,8 @@ test('requests made at transport open wait for public protocol readiness', async
     })
   })
   const client = new HermesGateway()
-  const opened = new Promise<void>(resolve => client.onState(state => { if (state === 'open') { resolve() } }))
-  const address = server.address() as { port: number }
-  const connected = client.connect(`ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`)
+  const opened = transportOpened(client)
+  const connected = client.connect(publicUrl(server))
   void connected.catch(() => {})
 
   try {
@@ -221,18 +171,12 @@ test('requests made at transport open wait for public protocol readiness', async
       session_id: 'chat', profile: 'engineer'
     })
   } finally {
-    client.close()
-
-    for (const socket of server.clients) { socket.terminate() }
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
 
 test.each([true, false])('a closed listener can immediately reconnect without rejecting the replacement handshake (ready=%s)', async advertised => {
-  const wsPackage = 'ws'
-  const { WebSocketServer } = await import(wsPackage)
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await new Promise<void>(resolve => server.once('listening', resolve))
+  const server = await listen()
   const peers: FixtureSocket[] = []
   server.on('connection', (socket: FixtureSocket) => {
     peers.push(socket)
@@ -248,14 +192,13 @@ test.each([true, false])('a closed listener can immediately reconnect without re
     }
   })
   const client = new HermesGateway()
-  const address = server.address() as { port: number }
-  const url = `ws://127.0.0.1:${address.port}/api/ws?ticket=public-fixture`
+  const url = publicUrl(server)
   let redial: Promise<void> | undefined
 
   let stop = () => {}
 
   try {
-    const opened = new Promise<void>(resolve => client.onState(state => { if (state === 'open') { resolve() } }))
+    const opened = transportOpened(client)
     stop = client.onState(state => {
       if (state !== 'closed') { return }
       stop()
@@ -275,9 +218,6 @@ test.each([true, false])('a closed listener can immediately reconnect without re
     expect(peers).toHaveLength(2)
   } finally {
     stop()
-    client.close()
-
-    for (const socket of server.clients) { socket.terminate() }
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await shut(client, server)
   }
 })
